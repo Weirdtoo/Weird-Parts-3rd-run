@@ -158,6 +158,9 @@ void main() {
         'awaitingCredential',
         'credentialReceiptSaved',
         'certificatePublic',
+        'capacity',
+        'byteLengths',
+        'users',
       ]),
     );
     expect(
@@ -385,7 +388,10 @@ void main() {
     await expectLater(f.probe(), throwsStateError);
     expect(changed, isTrue);
     f.store.onRead = null;
-    expect((await f.enrollment.userLifecycleStatus())!.disabled, isTrue);
+    expect(
+      (await f.enrollment.userLifecycleStatus(userId: f.userId))!.disabled,
+      isTrue,
+    );
     expect(f.enrollment.currentCompanySession, isNull);
   });
 }

@@ -55,7 +55,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
   }
 
   Future<bool> isCompanyUserOperationHeld(String userId, int credential) async {
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: userId);
     if (account == null) {
       throw const CompanyBootstrapRefusal('Current user account unavailable');
     }
@@ -119,7 +119,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
       db: db,
       installation: installation,
     );
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: current.userId);
     if (latest?.identityCommitment != account.identityCommitment) {
       throw const CompanyBootstrapRefusal(
         'User changed during terminal decision',
@@ -132,7 +132,11 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
         _UserAccount.decode(
           next.change({'a': latest.attempts}).encode(),
           revision: latest.revision,
+          slot: latest.slot,
         ),
+        requireCurrent: () async {
+          await _requireUserAdministrator(owner);
+        },
       ),
     );
     return CompanyUserDisableReceipt._(
@@ -292,10 +296,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
         'User recovery requires its own transaction',
       );
     }
-    final account = await _readUserAccount(reconcile: false);
-    if (account != null && account.isCurrentState) {
-      await _reconcileUserPinState(account);
-    }
+    await _readUserAccounts();
   }
 
   Future<_UserAccount> _reconcileUserPinState(_UserAccount account) async {
@@ -351,7 +352,10 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
         kind: state.disabled ? 'disabled' : 'pinReset',
       );
     });
-    final latest = await _readUserAccount(reconcile: false);
+    final latest = await _readUserAccount(
+      userId: state.userId,
+      reconcile: false,
+    );
     if (latest == null ||
         latest.identityCommitment != account.identityCommitment) {
       throw const CompanyBootstrapRefusal(
@@ -363,7 +367,16 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
           _securityCanonical(intent)) {
         throw const CompanyBootstrapRefusal('User projection intent changed');
       }
-      return _writeUserAccount(latest.change({'j': null}));
+      return _writeUserAccount(
+        latest.change({'j': null}),
+        requireCurrent: () async {
+          await _checkUserAccount(
+            latest,
+            requireActive: false,
+            requireJournal: false,
+          );
+        },
+      );
     }
     return latest;
   }
@@ -392,7 +405,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
     await _requireUserAdministrator(owner);
     return owner.runLocalCommand(() async {
       final custody = await _requireUserAdministrator(owner);
-      final account = await _readUserAccount();
+      final account = await _readUserAccount(userId: userId);
       if (account == null) {
         throw const CompanyBootstrapRefusal('User account unavailable');
       }
@@ -435,7 +448,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
           );
         }
         await _requireUserAdministrator(owner);
-        final latest = await _readUserAccount();
+        final latest = await _readUserAccount(userId: userId);
         if (latest?.identityCommitment != account.identityCommitment) {
           throw const CompanyBootstrapRefusal(
             'User reset changed during retry',
@@ -451,7 +464,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
           ),
         );
         await _requireUserAdministrator(owner);
-        if ((await _readUserAccount())?.identityCommitment !=
+        if ((await _readUserAccount(userId: userId))?.identityCommitment !=
             account.identityCommitment) {
           throw const CompanyBootstrapRefusal(
             'User reset changed during receipt retry',
@@ -512,20 +525,24 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
         previous,
       ];
       final placeholder = base64Encode(List<int>.filled(64, 255));
-      var next = _UserAccount._({
-        'v': 3,
-        'c': [body, placeholder],
-        'b': _userBinding(),
-        'p': [
-          1,
-          base64Encode(List<int>.filled(16, 255)),
-          base64Encode(List<int>.filled(32, 255)),
-        ],
-        'a': _companyAttempts,
-        'o': null,
-        'r': null,
-        'j': [previous, credential - 1],
-      }, account.revision);
+      var next = _UserAccount._(
+        {
+          'v': 3,
+          'c': [body, placeholder],
+          'b': _userBinding(),
+          'p': [
+            1,
+            base64Encode(List<int>.filled(16, 255)),
+            base64Encode(List<int>.filled(32, 255)),
+          ],
+          'a': _companyAttempts,
+          'o': null,
+          'r': null,
+          'j': [previous, credential - 1],
+        },
+        account.revision,
+        slot: account.slot,
+      );
       _preflightUserCapacity(next);
       final salt = _secureRandom(16);
       final verifier = await _deriveCompanySecret(pin, salt);
@@ -543,7 +560,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
         db: db,
         installation: installation,
       );
-      final latest = await _readUserAccount();
+      final latest = await _readUserAccount(userId: userId);
       if (latest == null ||
           latest.identityCommitment != account.identityCommitment) {
         throw const CompanyBootstrapRefusal(
@@ -553,7 +570,14 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
       await _checkUserAccount(latest);
       await _requireUserAdministrator(owner);
       final saved = await _writeUserAccount(
-        _UserAccount.decode(next.encode(), revision: latest.revision),
+        _UserAccount.decode(
+          next.encode(),
+          revision: latest.revision,
+          slot: latest.slot,
+        ),
+        requireCurrent: () async {
+          await _requireUserAdministrator(owner);
+        },
       );
       await _reconcileUserPinState(saved);
       return CompanyUserPinResetReceipt._(
@@ -581,7 +605,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
     _stateId(requestId);
     _joinVersion(expectedCredentialVersion);
     await _requireUserAdministrator(owner);
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: userId);
     if (account == null || !account.isCurrentState) {
       throw const CompanyBootstrapRefusal('Saved PIN replacement unavailable');
     }
@@ -608,7 +632,7 @@ extension CompanyUserPinRecovery on CompanyEnrollment {
         'Immutable reset predecessor differs',
       );
     }
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: userId);
     if (latest?.identityCommitment != account.identityCommitment) {
       throw const CompanyBootstrapRefusal(
         'User changed during receipt recovery',

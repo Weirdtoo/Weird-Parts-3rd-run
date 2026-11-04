@@ -78,7 +78,11 @@ provisionDisableFixture(JoinFixture f, String userId) async {
     request: request,
   );
   final ack = await f.bEnrollment.acceptUserProvision(bundle, peer: p.b);
-  await f.aEnrollment.acceptUserProvisionReceipt(ack, peer: p.a);
+  await f.aEnrollment.acceptUserProvisionReceipt(
+    ack,
+    peer: p.a,
+    userId: userId,
+  );
   return p;
 }
 
@@ -210,18 +214,36 @@ void main() {
     expect(File('${f.root.path}/refused.wpca').existsSync(), isFalse);
     final owner = await f.aEnrollment.signIn('1234');
     final noReuse = Map.of(f.aStore.states);
-    for (final intent in [request, const Uuid().v4()]) {
-      await expectLater(
-        f.aEnrollment.createRestrictedUser(
-          owner: owner,
-          requestId: intent,
-          name: 'Casey',
-          pin: '0123',
-        ),
-        throwsA(isA<CompanyBootstrapRefusal>()),
-      );
-      expectJoinProtectedUnchanged(f.aStore, noReuse);
-    }
+    await expectLater(
+      f.aEnrollment.createRestrictedUser(
+        owner: owner,
+        requestId: request,
+        name: 'Casey',
+        pin: '0123',
+      ),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    expectJoinProtectedUnchanged(f.aStore, noReuse);
+    final second = await f.aEnrollment.createRestrictedUser(
+      owner: owner,
+      requestId: const Uuid().v4(),
+      name: 'Independent builder',
+      pin: '4567',
+    );
+    expect(second.userId, isNot(user.userId));
+    expect(f.aStore.states[slot]!.revision, terminal.revision);
+    expect(f.aStore.states[slot]!.bytes, terminal.bytes);
+    final full = Map.of(f.aStore.states);
+    await expectLater(
+      f.aEnrollment.createRestrictedUser(
+        owner: owner,
+        requestId: const Uuid().v4(),
+        name: 'Third builder',
+        pin: '6789',
+      ),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    expectJoinProtectedUnchanged(f.aStore, full);
     final bSlot = companyUserNamespace(f.b.namespace);
     f.bStore.states[bSlot] = terminal;
     await f.bEnrollment.recover(
@@ -239,15 +261,26 @@ void main() {
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
     final recovered = await f.bEnrollment.signIn('1234');
+    final foreignProtected = Map.of(f.bStore.states);
+    final foreignSql = await sqlSnapshot(f.bDb);
+    // A copied terminal record still belongs to A's installation. Its occupied
+    // locator fences the whole collection rather than becoming free capacity.
     await expectLater(
       f.bEnrollment.createRestrictedUser(
         owner: recovered,
         requestId: const Uuid().v4(),
-        name: 'Replacement',
-        pin: '0123',
+        name: 'Independent recovered builder',
+        pin: '4567',
       ),
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
+    expectJoinProtectedUnchanged(f.bStore, foreignProtected);
+    expect(await sqlSnapshot(f.bDb), foreignSql);
+    expect(
+      f.bStore.states.containsKey(companyUserNamespace(f.b.namespace, slot: 2)),
+      isFalse,
+    );
+    expect(f.bStore.states[bSlot]!.revision, terminal.revision);
     expect(f.bStore.states[bSlot]!.bytes, terminal.bytes);
   }, timeout: const Timeout(Duration(minutes: 2)));
   test('held creation keeps dependent owner edits pending while independent owner work continues', () async {
@@ -398,7 +431,11 @@ void main() {
       throwsA(anything),
     );
     expect(await sqlSnapshot(f.bDb), before);
-    expect((await f.bEnrollment.userLifecycleStatus())!.disabled, isTrue);
+    expect(
+      (await f.bEnrollment.userLifecycleStatus(userId: created.userId))!
+          .disabled,
+      isTrue,
+    );
     await f.bEnrollment.signIn('1234');
     await disableJob(f.bEnrollment, 'Owner after held rollback');
   }, timeout: const Timeout(Duration(minutes: 2)));
@@ -448,8 +485,14 @@ void main() {
     );
     expect(result.complete, isFalse);
     expect(result.failure!.reason, CreatedJobSyncReason.unsupportedAuthor);
-    expect((await f.bEnrollment.userLifecycleStatus())!.disabled, isTrue);
-    expect((await f.aEnrollment.userLifecycleStatus())!.confirmed, isTrue);
+    expect(
+      (await f.bEnrollment.userLifecycleStatus(userId: user.userId))!.disabled,
+      isTrue,
+    );
+    expect(
+      (await f.aEnrollment.userLifecycleStatus(userId: user.userId))!.confirmed,
+      isTrue,
+    );
     final aRows = await f.aDb.select(f.aDb.companyJobs).get();
     final bRows = await f.bDb.select(f.bDb.companyJobs).get();
     expect(aRows.map((r) => r.jobId), containsAll([aj, bj, ownerA, ownerB]));
@@ -589,7 +632,11 @@ void main() {
       f.aEnrollment.signInUser(created.userId, '0123'),
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
-    expect((await f.aEnrollment.userLifecycleStatus())!.attemptsRemaining, 6);
+    expect(
+      (await f.aEnrollment.userLifecycleStatus(userId: created.userId))!
+          .attemptsRemaining,
+      6,
+    );
   });
 
   test('rootless peer applies signed decision and repeats receipt without refill or owner transport loss', () async {
@@ -646,17 +693,18 @@ void main() {
     await p.a.requireCurrent();
     await p.b.requireCurrent();
     var targetA = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: created.userId),
       p.a,
     );
     var sourceB = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: created.userId),
       p.b,
     );
     var policy = (await f.aEnrollment.prepareUserDisablePolicy(p.a, targetA))!;
     final beforeSQL = await sqlSnapshot(f.bDb);
-    final beforeAttempts =
-        (await f.bEnrollment.userLifecycleStatus())!.attemptsRemaining;
+    final beforeAttempts = (await f.bEnrollment.userLifecycleStatus(
+      userId: created.userId,
+    ))!.attemptsRemaining;
     for (final key in ['recipient', 'disable', 'certificate', 'v']) {
       final bad = Map<String, Object?>.from(
         jsonDecode(jsonEncode(policy)) as Map,
@@ -685,7 +733,11 @@ void main() {
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
     await expectLater(
-      f.aEnrollment.acceptUserProvisionReceipt(staleReceipt, peer: p.a),
+      f.aEnrollment.acceptUserProvisionReceipt(
+        staleReceipt,
+        peer: p.a,
+        userId: created.userId,
+      ),
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
     expectJoinProtectedUnchanged(f.aStore, disabledA);
@@ -694,11 +746,11 @@ void main() {
     await f.bEnrollment.signIn('1234');
     p = await disablePeers(f);
     targetA = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: created.userId),
       p.a,
     );
     sourceB = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: created.userId),
       p.b,
     );
     policy = (await f.aEnrollment.prepareUserDisablePolicy(p.a, targetA))!;
@@ -742,7 +794,11 @@ void main() {
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
     expectJoinProtectedUnchanged(f.bStore, immutable);
-    await f.aEnrollment.acceptUserDisableReceipt(ack, p.a);
+    await f.aEnrollment.acceptUserDisableReceipt(
+      ack,
+      p.a,
+      userId: created.userId,
+    );
     final rootSaved = Map.of(f.aStore.states);
     final reversed = Map<String, Object?>.from(policy)
       ..['source'] = policy['recipient']
@@ -766,7 +822,8 @@ void main() {
       expect((record['d'] as List)[4], isNotNull);
     }
     expect(
-      (await f.bEnrollment.userLifecycleStatus())!.attemptsRemaining,
+      (await f.bEnrollment.userLifecycleStatus(userId: created.userId))!
+          .attemptsRemaining,
       beforeAttempts,
     );
     await f.bEnrollment.acceptUserDisablePolicy(policy, p.b, sourceB);
@@ -774,8 +831,16 @@ void main() {
     expect(await sqlSnapshot(f.bDb), beforeSQL);
     await p.a.requireCurrent();
     await p.b.requireCurrent();
-    expect((await f.aEnrollment.userLifecycleStatus())!.confirmed, isTrue);
-    expect((await f.bEnrollment.userLifecycleStatus())!.disabled, isTrue);
+    expect(
+      (await f.aEnrollment.userLifecycleStatus(userId: created.userId))!
+          .confirmed,
+      isTrue,
+    );
+    expect(
+      (await f.bEnrollment.userLifecycleStatus(userId: created.userId))!
+          .disabled,
+      isTrue,
+    );
     await f.reopenB();
     await expectLater(
       f.bEnrollment.signInUser(created.userId, '0123'),

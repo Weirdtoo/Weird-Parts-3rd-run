@@ -54,14 +54,18 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
   CompanySession? _session;
   List<CompanyUserChoice> _users = const [];
   String? _selectedUser;
+  String? _managedUserId;
+  int _userLoadEpoch = 0;
   final _userName = TextEditingController();
   final _userPin = TextEditingController();
   final _replacementPin = TextEditingController();
   String? _userResetRequest;
   int? _userResetExpected;
   String? _userResetPin;
+  String? _userResetTarget;
   String? _userCreateRequest;
   String? _userDisableRequest;
+  String? _userDisableTarget;
   CompanyUserLifecycleStatus? _userLifecycle;
   String? _error;
   String? _recoveryPath;
@@ -75,6 +79,57 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
   bool _foreground = true;
   int _loginIntentEpoch = 0;
   int _jobsViewEpoch = 0;
+
+  List<CompanyUserChoice> get _additionalUsers => _users.skip(1).toList();
+  bool get _userDirectoryValid =>
+      _users.isNotEmpty &&
+      _additionalUsers.every(
+        (user) =>
+            user.userId.isNotEmpty &&
+            user.capabilities.length == 1 &&
+            user.capabilities.single == 'createJob',
+      ) &&
+      _users.map((user) => user.userId).toSet().length == _users.length;
+  CompanyUserChoice? get _managedUser {
+    if (!_userDirectoryValid) return null;
+    final matches = _additionalUsers
+        .where((user) => user.userId == _managedUserId)
+        .toList();
+    return matches.length == 1 ? matches.single : null;
+  }
+
+  bool get _managementPending =>
+      _userResetRequest != null || _userDisableRequest != null;
+
+  String _managementLabel(CompanyUserChoice user) {
+    final duplicateName =
+        _additionalUsers.where((other) => other.name == user.name).length > 1;
+    return '${user.name} — ${duplicateName ? '${user.userId} — ' : ''}'
+        'Create Job only${user.disabled ? ' (disabled)' : ''}';
+  }
+
+  String _signInLabel(CompanyUserChoice user) {
+    final duplicateName =
+        _users.where((other) => other.name == user.name).length > 1;
+    return '${user.name}${duplicateName ? ' — ${user.userId}' : ''}'
+        '${user.disabled ? ' (disabled)' : ''}';
+  }
+
+  Future<void> _selectManagedUser(String? userId) async {
+    if (_busy ||
+        _managementPending ||
+        !_userDirectoryValid ||
+        !_additionalUsers.any((user) => user.userId == userId)) {
+      return;
+    }
+    setState(() {
+      _managedUserId = userId;
+      _userLifecycle = null;
+      _replacementPin.clear();
+      _error = null;
+    });
+    await _load();
+  }
 
   @override
   void initState() {
@@ -177,14 +232,20 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
   }
 
   Future<void> _load() async {
+    final epoch = ++_userLoadEpoch;
+    final managedUserId = _managedUserId;
     var status = await _enrollment.readStatus();
     final users = status == CompanyBootstrapStatus.active
         ? await _enrollment.listCompanyUsers()
         : <CompanyUserChoice>[];
     CompanyUserLifecycleStatus? lifecycle;
-    if (status == CompanyBootstrapStatus.active) {
+    if (status == CompanyBootstrapStatus.active &&
+        managedUserId != null &&
+        users.where((user) => user.userId == managedUserId).length == 1) {
       try {
-        lifecycle = await _enrollment.userLifecycleStatus();
+        lifecycle = await _enrollment.userLifecycleStatus(
+          userId: managedUserId,
+        );
       } catch (_) {}
     }
     var legacy = status == CompanyBootstrapStatus.legacyUnsupported;
@@ -202,10 +263,13 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
         status = CompanyBootstrapStatus.needsRecovery;
       }
     }
-    if (!mounted) return;
+    if (!mounted || epoch != _userLoadEpoch) return;
     setState(() {
       _users = users;
       _userLifecycle = lifecycle;
+      if (!users.skip(1).any((user) => user.userId == _managedUserId)) {
+        _managedUserId = null;
+      }
       if (!users.any((u) => u.userId == _selectedUser && u.available)) {
         _selectedUser = users.where((u) => u.available).firstOrNull?.userId;
       }
@@ -385,12 +449,15 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
 
   Future<void> _disableUser() async {
     final owner = _session;
-    final user = _users.skip(1).firstOrNull;
+    final user = _managedUser;
     if (_busy ||
         owner is! OwnerSession ||
         !owner.identity.isAuthorityOwner ||
         user == null ||
-        (user.userId.isEmpty || user.disabled)) {
+        user.disabled ||
+        _userLifecycle?.userId != user.userId ||
+        _userResetRequest != null ||
+        (_userDisableTarget != null && _userDisableTarget != user.userId)) {
       return;
     }
     setState(() {
@@ -399,11 +466,14 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
     });
     try {
       _userDisableRequest ??= const Uuid().v4();
+      _userDisableTarget ??= user.userId;
       await _enrollment.disableRestrictedUser(
         owner: owner,
-        userId: user.userId,
+        userId: _userDisableTarget!,
         requestId: _userDisableRequest!,
       );
+      _userDisableRequest = null;
+      _userDisableTarget = null;
       await _load();
     } on CompanyBootstrapRefusal catch (error) {
       if (mounted) setState(() => _error = error.message);
@@ -420,13 +490,16 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
 
   Future<void> _resetUserPin() async {
     final owner = _session;
-    final user = _users.skip(1).firstOrNull;
+    final user = _managedUser;
     if (_busy ||
         owner is! OwnerSession ||
         !owner.identity.isAuthorityOwner ||
         user == null ||
         user.userId.isEmpty ||
-        user.disabled) {
+        user.disabled ||
+        _userLifecycle?.userId != user.userId ||
+        _userDisableRequest != null ||
+        (_userResetTarget != null && _userResetTarget != user.userId)) {
       return;
     }
     setState(() {
@@ -435,11 +508,12 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
     });
     try {
       _userResetRequest ??= const Uuid().v4();
-      _userResetExpected ??= _userLifecycle?.credentialVersion ?? 1;
+      _userResetTarget ??= user.userId;
+      _userResetExpected ??= _userLifecycle!.credentialVersion;
       _userResetPin ??= _replacementPin.text;
       final receipt = await _enrollment.resetRestrictedUserPin(
         owner: owner,
-        userId: user.userId,
+        userId: _userResetTarget!,
         requestId: _userResetRequest!,
         expectedCredentialVersion: _userResetExpected!,
         pin: _userResetPin!,
@@ -448,6 +522,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
       _userResetRequest = null;
       _userResetExpected = null;
       _userResetPin = null;
+      _userResetTarget = null;
       await _load();
       if (!receipt.isCurrent && mounted) {
         setState(
@@ -786,6 +861,9 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
         const Text('Select a company user and enter their PIN.'),
         DropdownButtonFormField<String>(
           key: const Key('company-user-selector'),
+          isExpanded: true,
+          isDense: false,
+          itemHeight: null,
           initialValue: _selectedUser,
           decoration: const InputDecoration(labelText: 'Company user'),
           items: [
@@ -793,9 +871,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
               DropdownMenuItem(
                 value: user.userId,
                 enabled: user.available,
-                child: Text(
-                  '${user.name}${user.disabled ? ' (disabled)' : ''}',
-                ),
+                child: Text(_signInLabel(user)),
               ),
           ],
           onChanged: _busy
@@ -863,7 +939,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
       const SizedBox(height: 16),
       if (session is OwnerSession && identity.isAuthorityOwner) ...[
         const Text(
-          'Company users. This version supports the owner and one additional Create Job user.',
+          'Company users. Additional users have Create Job permission only.',
         ),
         for (final user in _users)
           Text(
@@ -873,31 +949,58 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
                 ? ''
                 : ' (unavailable)'}',
           ),
-        if (_users
-            .skip(1)
-            .any((user) => user.userId.isNotEmpty && !user.disabled))
+        if (_userDirectoryValid && _additionalUsers.isNotEmpty)
+          DropdownButtonFormField<String>(
+            key: const Key('company-managed-user-selector'),
+            isExpanded: true,
+            isDense: false,
+            itemHeight: null,
+            initialValue: _managedUserId,
+            decoration: const InputDecoration(
+              labelText: 'Manage additional user',
+            ),
+            items: [
+              for (final user in _additionalUsers)
+                DropdownMenuItem(
+                  value: user.userId,
+                  child: Text(_managementLabel(user)),
+                ),
+            ],
+            onChanged: _busy || _managementPending
+                ? null
+                : (value) => _selectManagedUser(value),
+          ),
+        if (!_userDirectoryValid)
+          const Text(
+            'Additional-user policy is unavailable. Management needs recovery.',
+          ),
+        if (_managedUser != null &&
+            !_managedUser!.disabled &&
+            _userLifecycle?.userId == _managedUserId)
           OutlinedButton(
             key: const Key('company-disable-user'),
-            onPressed: _busy ? null : _disableUser,
-            child: const Text('Disable additional user permanently'),
+            onPressed: _busy || _userResetRequest != null ? null : _disableUser,
+            child: Text('Disable ${_managedUser!.name} permanently'),
           ),
-        if (_users
-            .skip(1)
-            .any((user) => user.userId.isNotEmpty && !user.disabled)) ...[
+        if (_managedUser != null &&
+            !_managedUser!.disabled &&
+            _userLifecycle?.userId == _managedUserId) ...[
           TextField(
             key: const Key('company-reset-pin'),
             controller: _replacementPin,
             enabled: !_busy && _userResetRequest == null,
             obscureText: true,
             keyboardType: TextInputType.number,
-            decoration: const InputDecoration(
-              labelText: 'Replacement additional-user PIN',
+            decoration: InputDecoration(
+              labelText: 'Replacement PIN for ${_managedUser!.name}',
             ),
           ),
           OutlinedButton(
             key: const Key('company-reset-user'),
-            onPressed: _busy ? null : _resetUserPin,
-            child: const Text('Replace additional-user PIN'),
+            onPressed: _busy || _userDisableRequest != null
+                ? null
+                : _resetUserPin,
+            child: Text('Replace PIN for ${_managedUser!.name}'),
           ),
           if (_userResetRequest != null) ...[
             const Text(
@@ -911,6 +1014,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
                         _userResetRequest = null;
                         _userResetExpected = null;
                         _userResetPin = null;
+                        _userResetTarget = null;
                         _replacementPin.clear();
                       });
                       await _load();
@@ -934,7 +1038,25 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
                 ? 'Additional user disabled. The retained installation confirmed the decision.'
                 : 'Additional user disabled here. Remote confirmation is pending; disconnected devices retain their cached rights. Verify the retained peer and Sync Now.',
           ),
-        if (_users.length < 2) ...[
+        if (_userDisableRequest != null) ...[
+          const Text(
+            'This disable request is pending for the selected user. Retry the same request.',
+          ),
+          TextButton(
+            onPressed: _busy
+                ? null
+                : () async {
+                    setState(() {
+                      _userDisableRequest = null;
+                      _userDisableTarget = null;
+                    });
+                    await _load();
+                  },
+            child: const Text('Review selected user status'),
+          ),
+        ],
+        if (_userDirectoryValid &&
+            _additionalUsers.length < kCompanyUserCapacity) ...[
           TextField(
             key: const Key('company-user-name'),
             controller: _userName,
@@ -954,9 +1076,9 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
             onPressed: _busy ? null : _createUser,
             child: const Text('Create restricted user'),
           ),
-        ] else
+        ] else if (_userDirectoryValid)
           const Text(
-            'Additional user capacity reached. Use the retained peer connection to provision this user.',
+            'Additional user capacity reached. Select a user on the retained peer page to provision them.',
           ),
       ],
       FilledButton(

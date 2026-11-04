@@ -141,7 +141,9 @@ final class HeldPeerCreateContext {
       throw const CompanyBootstrapRefusal('User proof missing');
     }
     final enrollment = peer._owner.enrollment;
-    final account = await enrollment._readUserAccount();
+    final account = await enrollment._readUserAccount(
+      userId: _userCertificateUserId(certificate),
+    );
     if (account == null) {
       throw const CompanyBootstrapRefusal('Current user account unavailable');
     }

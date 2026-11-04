@@ -99,10 +99,11 @@ class RunnerTests: XCTestCase {
   }
   #endif
 
-  func testInstallationSecurityNamespaceAcceptsCompanyUserSlot() throws {
-    let namespace = try InstallationSecurityNamespace("production.company-user-1")
-
-    XCTAssertEqual(namespace.rawValue, "production.company-user-1")
+  func testInstallationSecurityNamespaceAcceptsBoundedCompanyUserSlots() throws {
+    for slot in 1...2 {
+      let name = "production.company-user-\(slot)"
+      XCTAssertEqual(try InstallationSecurityNamespace(name).rawValue, name)
+    }
   }
 
   func testInstallationSecurityNamespacePreservesExistingNames() throws {
@@ -114,6 +115,8 @@ class RunnerTests: XCTestCase {
       "synthetic.production",
       "synthetic.production.company-custody",
       "synthetic.production.company-user-1",
+      "synthetic.production.company-user-2",
+      "synthetic.production.company-user-3",
     ]
 
     for name in names {
@@ -138,9 +141,17 @@ class RunnerTests: XCTestCase {
 
   func testInstallationSecurityNamespaceRejectsProductionLookalikes() {
     let names = [
-      "production.company-user-2",
+      "production.company-user-0",
+      "production.company-user-3",
+      "production.company-user-01",
+      "production.company-user-02",
+      "production.company-user--1",
+      "production.company-user-+1",
+      "production.company-user-",
+      "production.company-user-999999999999999999999999999999",
       "xproduction.company-user-1",
       "production.company-user-1.extra",
+      "production.company-user-2.extra",
       "production.company-User-1",
       "production.company-custody.extra",
     ]

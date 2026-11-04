@@ -53,6 +53,21 @@ std::string RequiredString(const Map& map, const char* key) {
   return *text;
 }
 
+bool IsCompanyUserNamespace(const std::string& value) {
+  constexpr size_t kMaximumCompanyUsers = 2;
+  const std::string prefix = "production.company-user-";
+  if (value.rfind(prefix, 0) != 0 || value.size() <= prefix.size() ||
+      value[prefix.size()] == '0') return false;
+  size_t slot = 0;
+  for (size_t i = prefix.size(); i < value.size(); ++i) {
+    const char digit = value[i];
+    if (digit < '0' || digit > '9') return false;
+    slot = slot * 10 + static_cast<size_t>(digit - '0');
+    if (slot > kMaximumCompanyUsers) return false;
+  }
+  return slot >= 1;
+}
+
 std::string Namespace(const Map& map) {
   auto value = RequiredString(map, "namespace");
   if (value.empty() || value.size() > 64) throw Failure("installation_invalid_argument");
@@ -61,7 +76,7 @@ std::string Namespace(const Map& map) {
           c == '.' || c == '_' || c == '-')) throw Failure("installation_invalid_argument");
   }
   if (value != "production" && value != "production.company-custody" &&
-      value != "production.company-user-1") {
+      !IsCompanyUserNamespace(value)) {
     if (value.rfind("synthetic.", 0) != 0 || value.size() <= 10 ||
         !((value[10] >= 'a' && value[10] <= 'z') ||
           (value[10] >= '0' && value[10] <= '9'))) throw Failure("installation_invalid_argument");

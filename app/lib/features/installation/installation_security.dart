@@ -834,10 +834,20 @@ class NativeInstallationSecureStore
 }
 
 void validateInstallationNamespace(String namespace) {
+  const userPrefix = 'production.company-user-';
+  final suffix = namespace.startsWith(userPrefix)
+      ? namespace.substring(userPrefix.length)
+      : '';
+  final slot = int.tryParse(suffix);
+  final userNamespace =
+      slot != null &&
+      slot >= 1 &&
+      slot <= kCompanyUserCapacity &&
+      '$slot' == suffix;
   if (namespace.length > 64 ||
       !(namespace == 'production' ||
           namespace == 'production.company-custody' ||
-          namespace == 'production.company-user-1' ||
+          userNamespace ||
           RegExp(r'^synthetic\.[a-z0-9][a-z0-9._-]*$').hasMatch(namespace))) {
     throw ArgumentError.value(
       namespace,
@@ -850,7 +860,7 @@ void validateInstallationNamespace(String namespace) {
 String companyCustodyNamespace(String baseNamespace) {
   validateInstallationNamespace(baseNamespace);
   if (baseNamespace.endsWith('.company-custody') ||
-      baseNamespace.endsWith('.company-user-1')) {
+      RegExp(r'\.company-user-[1-9][0-9]*$').hasMatch(baseNamespace)) {
     throw ArgumentError.value(baseNamespace, 'baseNamespace');
   }
   final companion = '$baseNamespace.company-custody';

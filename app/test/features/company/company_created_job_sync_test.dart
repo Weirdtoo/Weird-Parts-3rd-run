@@ -173,14 +173,34 @@ Future<void> admitAttackRun(
   final recipient = base64Encode(
     pair.b.availability.enrollment.installation.identity!.publicKey,
   );
+  final users =
+      (await source.enrollment.listCompanyUsers())
+          .skip(1)
+          .map((user) => user.userId)
+          .toList()
+        ..sort();
   for (final step in <(String, Map<String, Object?>)>[
-    ('profile', {'profile': 'company.user.state@1/job.create.authorization@4'}),
     (
-      'policyOffer',
-      {'offer': await source.enrollment.createUserLifecycleOffer(source.peer)},
+      'profile',
+      {
+        'profile': '$kCompanyUserProfile/job.create.authorization@4',
+        'capacity': kCompanyUserCapacity,
+        'users': users,
+      },
     ),
-    ('policy', {'policy': null}),
-    ('policyAck', {'receipt': null}),
+    for (final userId in users) ...[
+      (
+        'policyOffer',
+        {
+          'offer': await source.enrollment.createUserLifecycleOffer(
+            source.peer,
+            userId: userId,
+          ),
+        },
+      ),
+      ('policy', {'policy': null}),
+      ('policyAck', {'receipt': null}),
+    ],
   ]) {
     await pair.b.receive(
       await syncAttackWire(
@@ -195,6 +215,131 @@ Future<void> admitAttackRun(
 }
 
 void main() {
+  test('collection capability and complete per-user policy gate inventory without mutation', () async {
+    final f = await JoinFixture.create();
+    await activateFixtureB(f);
+    final first = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'First',
+      pin: '0123',
+    );
+    final second = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Second',
+      pin: '4567',
+    );
+    final pair = await openSyncPair(f);
+    final users = [first.userId, second.userId]..sort();
+    final before = Map.of(f.bStore.states);
+    final sql = await sqlSnapshot(f.bDb);
+    final recipient = base64Encode(f.b.identity!.publicKey);
+    for (final bad in [
+      {'profile': 'company.user.state@1/job.create.authorization@4'},
+      {
+        'profile': '$kCompanyUserProfile/job.create.authorization@4',
+        'capacity': 1,
+        'users': users,
+      },
+      {
+        'profile': '$kCompanyUserProfile/job.create.authorization@4',
+        'capacity': 2.0,
+        'users': users,
+      },
+      {
+        'profile': '$kCompanyUserProfile/job.create.authorization@4',
+        'capacity': kCompanyUserCapacity,
+        'users': [first.userId, first.userId],
+      },
+      {
+        'profile': '$kCompanyUserProfile/job.create.authorization@4',
+        'capacity': kCompanyUserCapacity,
+        'users': users.reversed.toList(),
+      },
+    ]) {
+      await expectLater(
+        pair.b.receive(
+          await syncAttackWire(
+            pair.a.controller.pairedJoinSession!,
+            recipient,
+            const Uuid().v4(),
+            'profile',
+            bad,
+          ),
+        ),
+        throwsA(isA<CompanyBootstrapRefusal>()),
+      );
+      expectJoinProtectedUnchanged(f.bStore, before);
+      expect(await sqlSnapshot(f.bDb), sql);
+    }
+    final run = const Uuid().v4();
+    for (final step in <(String, Map<String, Object?>)>[
+      (
+        'profile',
+        {
+          'profile': '$kCompanyUserProfile/job.create.authorization@4',
+          'capacity': kCompanyUserCapacity,
+          'users': users,
+        },
+      ),
+      (
+        'policyOffer',
+        {
+          'offer': await f.aEnrollment.createUserLifecycleOffer(
+            pair.a.availability.peer,
+            userId: first.userId,
+          ),
+        },
+      ),
+      ('policy', {'policy': null}),
+      ('policyAck', {'receipt': null}),
+    ]) {
+      await pair.b.receive(
+        await syncAttackWire(
+          pair.a.controller.pairedJoinSession!,
+          recipient,
+          run,
+          step.$1,
+          step.$2,
+        ),
+      );
+    }
+    await expectLater(
+      pair.b.receive(
+        await syncAttackWire(
+          pair.a.controller.pairedJoinSession!,
+          recipient,
+          run,
+          'start',
+          {},
+        ),
+      ),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    expectJoinProtectedUnchanged(f.bStore, before);
+    expect(await sqlSnapshot(f.bDb), sql);
+    // A peer's advertised absence cannot omit either locally known account.
+    final omittedRun = const Uuid().v4();
+    final source = pair.b.controller.pairedJoinSession!;
+    final aRecipient = base64Encode(f.a.identity!.publicKey);
+    final aBefore = Map.of(f.aStore.states);
+    await pair.a.receive(
+      await syncAttackWire(source, aRecipient, omittedRun, 'profile', {
+        'profile': '$kCompanyUserProfile/job.create.authorization@4',
+        'capacity': kCompanyUserCapacity,
+        'users': <String>[],
+      }),
+    );
+    await expectLater(
+      pair.a.receive(
+        await syncAttackWire(source, aRecipient, omittedRun, 'start', {}),
+      ),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    expectJoinProtectedUnchanged(f.aStore, aBefore);
+  });
+
   test('creation confirmation survives a pending owner edit while whole-Job confirmation waits', () async {
     final f = await JoinFixture.create(allowOwnerAdditions: true);
     await activateFixtureB(f);
@@ -1623,9 +1768,6 @@ void main() {
     );
     expect(actions, [
       'profile',
-      'policyOffer',
-      'policy',
-      'policyAck',
       'start',
       'holdings',
       'page',
@@ -1633,8 +1775,8 @@ void main() {
       'ackBoth',
       'finish',
     ]);
-    expect([remaining(resumed.a), remaining(resumed.b)], [4, 4]);
-    stdout.writeln('Constrained sync trace: $trace; final A=4 B=4.');
+    expect([remaining(resumed.a), remaining(resumed.b)], [7, 7]);
+    stdout.writeln('Constrained sync trace: $trace; final A=7 B=7.');
     expect(result.sent, 1);
     expect(await f.bDb.select(f.bDb.companyJobs).get(), hasLength(2));
     expect(await f.bDb.select(f.bDb.companyJobPeerAcks).get(), hasLength(2));

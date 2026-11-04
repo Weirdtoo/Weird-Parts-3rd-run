@@ -4,8 +4,8 @@ const _userPinIssuanceDomain = 'wiredpart.company.user.pin.issuance@1:';
 const _userPinSuffixLimit = 16;
 
 extension CompanyUserPinTransfer on CompanyEnrollment {
-  Future<List<Object?>?> _userCheckpoint() async {
-    final account = await _readUserAccount();
+  Future<List<Object?>?> _userCheckpoint(String userId) async {
+    final account = await _readUserAccount(userId: userId);
     if (account == null) return null;
     await _checkUserAccount(account, requireActive: false);
     final user = await _resolveUserAuthority(
@@ -32,7 +32,7 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
     if (!identical(target._peer, peer)) {
       throw const CompanyBootstrapRefusal('User policy target differs');
     }
-    var account = await _readUserAccount();
+    var account = await _readUserAccount(userId: target.userId);
     if (account == null || !account.isCurrentState) return null;
     await _checkUserAccount(account, requireActive: false);
     final current = await _currentUserState(account);
@@ -93,13 +93,16 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
     if (complete &&
         _securityCanonical(account.values['o']) !=
             _securityCanonical(binding)) {
-      final latest = await _readUserAccount();
+      final latest = await _readUserAccount(userId: target.userId);
       if (latest?.identityCommitment != account.identityCommitment) {
         throw const CompanyBootstrapRefusal('User policy changed');
       }
       await _requireUserPeer(peer);
       account = await _writeUserAccount(
         latest!.change({'o': binding, 'r': null}),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+        },
       );
     }
     Map<String, Object?>? secret;
@@ -132,7 +135,7 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
       );
     }
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: target.userId);
     if (latest?.identityCommitment != account.identityCommitment) {
       throw const CompanyBootstrapRefusal(
         'User policy changed before delivery',
@@ -206,7 +209,10 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
       trust: trust,
       floors: installation.knownSecurityFloors,
     );
-    var account = await _readUserAccount();
+    if (target.userId != source.userId) {
+      throw const CompanyBootstrapRefusal('User policy identity differs');
+    }
+    var account = await _readUserAccount(userId: target.userId);
     if (account?.isDisabled == true &&
         (account?.isCurrentState != true ||
             account!.certificate != target.certificateBytes)) {
@@ -275,25 +281,31 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
         }
       }
       final old = account;
-      final pending = _UserAccount._({
-        'v': 3,
-        'c': _decodeUserJson(state.certificateBytes),
-        'b': _userBinding(),
-        'p': null,
-        'a': state.disabled
-            ? (account?.attempts ?? _companyAttempts)
-            : _companyAttempts,
-        'o': [1, state.requestId, ...source._binding],
-        'r': null,
-        'j': [state.previousPublicHead, state.sequence - 1],
-      }, account?.revision);
+      final pending = _UserAccount._(
+        {
+          'v': 3,
+          'c': _decodeUserJson(state.certificateBytes),
+          'b': _userBinding(),
+          'p': null,
+          'a': state.disabled
+              ? (account?.attempts ?? _companyAttempts)
+              : _companyAttempts,
+          'o': [1, state.requestId, ...source._binding],
+          'r': null,
+          'j': [state.previousPublicHead, state.sequence - 1],
+        },
+        account?.revision,
+        slot:
+            account?.slot ??
+            (await _readUserAccounts(reconcile: false)).freeSlot,
+      );
       await CompanyUserStateRecord.decode(
         pending.encode(),
         db: db,
         installation: installation,
       );
       await _requireUserPeer(peer);
-      final latest = await _readUserAccount();
+      final latest = await _readUserAccount(userId: target.userId);
       if ((old == null && latest != null) ||
           (old != null &&
               latest?.identityCommitment != old.identityCommitment)) {
@@ -310,11 +322,15 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
                     : pending)
                 .encode(),
             revision: latest?.revision,
+            slot: pending.slot,
           ),
+          requireCurrent: () async {
+            await _requireUserPeer(peer);
+          },
         ),
       );
     }
-    account = await _readUserAccount();
+    account = await _readUserAccount(userId: target.userId);
     if (account == null ||
         !account.isCurrentState ||
         account.certificate != target.certificateBytes) {
@@ -358,7 +374,7 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
         base64Encode(trust.rootKey),
         _userPinIssuanceDomain,
       );
-      final latest = await _readUserAccount();
+      final latest = await _readUserAccount(userId: target.userId);
       if (latest?.identityCommitment != account.identityCommitment) {
         throw const CompanyBootstrapRefusal(
           'User changed during private issuance',
@@ -376,7 +392,14 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
         installation: installation,
       );
       await _requireUserPeer(peer);
-      if (latest.values['p'] == null) account = await _writeUserAccount(next);
+      if (latest.values['p'] == null) {
+        account = await _writeUserAccount(
+          next,
+          requireCurrent: () async {
+            await _requireUserPeer(peer);
+          },
+        );
+      }
     }
     final receipt = await _signJoin(
       installation,
@@ -384,14 +407,19 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
       _userStateReceiptDomain,
     );
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: target.userId);
     if (latest?.certificate != target.certificateBytes) {
       throw const CompanyBootstrapRefusal('User changed before policy receipt');
     }
     if (_securityCanonical(latest!.values['o']) ==
             _securityCanonical([1, target.requestId, ...source._binding]) &&
         latest.values['r'] != receipt['signature']) {
-      await _writeUserAccount(latest.change({'r': receipt['signature']}));
+      await _writeUserAccount(
+        latest.change({'r': receipt['signature']}),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+        },
+      );
     }
     await _saveUserPinDelivery(target, receipt);
     return receipt;
@@ -443,8 +471,9 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
 
   Future<void> _acceptUserPinReceipt(
     Map<String, Object?> signed,
-    VerifiedPeerMembership peer,
-  ) async {
+    VerifiedPeerMembership peer, {
+    required String userId,
+  }) async {
     if (db.hasCallerTransaction) {
       throw const CompanyBootstrapRefusal(
         'User receipt requires its own transaction',
@@ -463,7 +492,7 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
       'recipient',
     });
     await _requireUserPeer(peer);
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: userId);
     if (account == null) {
       throw const CompanyBootstrapRefusal('Current user account unavailable');
     }
@@ -512,7 +541,7 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
       _userStateReceiptDomain,
     );
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: userId);
     if (latest == null) {
       throw const CompanyBootstrapRefusal('Current user account unavailable');
     }
@@ -527,7 +556,12 @@ extension CompanyUserPinTransfer on CompanyEnrollment {
             _securityCanonical([0, state.requestId, ...recipient]) &&
         latest.values['r'] != snapshot['signature']) {
       await _requireUserPeer(peer);
-      await _writeUserAccount(latest.change({'r': snapshot['signature']}));
+      await _writeUserAccount(
+        latest.change({'r': snapshot['signature']}),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+        },
+      );
     }
   }
 }

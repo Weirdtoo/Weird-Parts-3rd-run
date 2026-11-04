@@ -17,14 +17,17 @@ import 'company_join_test.dart'
 import 'company_user_disable_domain_test.dart'
     show provisionDisableFixture, disablePeers, disableJob;
 
-Future<Map<String, Object?>> _exchangePolicy(JoinFixture f) async {
+Future<Map<String, Object?>> _exchangePolicy(
+  JoinFixture f,
+  String userId,
+) async {
   final p = await disablePeers(f);
   final target = await f.aEnrollment.verifyUserLifecycleOffer(
-    await f.bEnrollment.createUserLifecycleOffer(p.b),
+    await f.bEnrollment.createUserLifecycleOffer(p.b, userId: userId),
     p.a,
   );
   final source = await f.bEnrollment.verifyUserLifecycleOffer(
-    await f.aEnrollment.createUserLifecycleOffer(p.a),
+    await f.aEnrollment.createUserLifecycleOffer(p.a, userId: userId),
     p.b,
   );
   final policy = (await f.aEnrollment.prepareUserDisablePolicy(p.a, target))!;
@@ -33,7 +36,7 @@ Future<Map<String, Object?>> _exchangePolicy(JoinFixture f) async {
     p.b,
     source,
   );
-  await f.aEnrollment.acceptUserDisableReceipt(receipt, p.a);
+  await f.aEnrollment.acceptUserDisableReceipt(receipt, p.a, userId: userId);
   return receipt!;
 }
 
@@ -68,12 +71,17 @@ void main() {
         Future<void> expectStatus(String? target, bool confirmed) async {
           final protected = Map.of(f.aStore.states);
           final sql = await sqlSnapshot(f.aDb);
-          final status = (await f.aEnrollment.userProvisionStatus(f.owner))!;
+          final status = (await f.aEnrollment.userProvisionStatus(
+            f.owner,
+            userId: user.userId,
+          ))!;
           expect(status.userId, user.userId);
           expect(status.disabled, isTrue);
           expect(status.targetDeviceId, target);
           expect(status.confirmed, confirmed);
-          final lifecycle = (await f.aEnrollment.userLifecycleStatus())!;
+          final lifecycle = (await f.aEnrollment.userLifecycleStatus(
+            userId: user.userId,
+          ))!;
           expect(lifecycle.userId, user.userId);
           expect(lifecycle.disabled, isTrue);
           expect(lifecycle.credentialVersion, resetCount + 1);
@@ -86,11 +94,17 @@ void main() {
         await expectStatus(resetCount == 0 ? initial.a.deviceId : null, false);
         final p = await disablePeers(f);
         final target = await f.aEnrollment.verifyUserLifecycleOffer(
-          await f.bEnrollment.createUserLifecycleOffer(p.b),
+          await f.bEnrollment.createUserLifecycleOffer(
+            p.b,
+            userId: user.userId,
+          ),
           p.a,
         );
         final source = await f.bEnrollment.verifyUserLifecycleOffer(
-          await f.aEnrollment.createUserLifecycleOffer(p.a),
+          await f.aEnrollment.createUserLifecycleOffer(
+            p.a,
+            userId: user.userId,
+          ),
           p.b,
         );
         final policy = (await f.aEnrollment.prepareUserDisablePolicy(
@@ -103,7 +117,11 @@ void main() {
           p.b,
           source,
         );
-        await f.aEnrollment.acceptUserDisableReceipt(receipt!, p.a);
+        await f.aEnrollment.acceptUserDisableReceipt(
+          receipt!,
+          p.a,
+          userId: user.userId,
+        );
         await expectStatus(p.a.deviceId, true);
       },
       timeout: const Timeout(Duration(seconds: 90)),
@@ -137,10 +155,14 @@ void main() {
       final protected = Map.of(f.aStore.states);
       final sql = await sqlSnapshot(f.aDb);
       await expectLater(
-        f.aEnrollment.acceptUserDisableReceipt({
-          'body': {'kind': 'company.user.disable.receipt@1'},
-          'signature': '',
-        }, p.a),
+        f.aEnrollment.acceptUserDisableReceipt(
+          {
+            'body': {'kind': 'company.user.disable.receipt@1'},
+            'signature': '',
+          },
+          p.a,
+          userId: user.userId,
+        ),
         throwsA(isA<CompanyBootstrapRefusal>()),
       );
       expectJoinProtectedUnchanged(f.aStore, protected);
@@ -165,7 +187,7 @@ void main() {
       expectedCredentialVersion: 1,
       pin: '4567',
     );
-    final firstDelivery = await _exchangePolicy(f);
+    final firstDelivery = await _exchangePolicy(f, user.userId);
     await f.bEnrollment.signInUser(user.userId, '4567');
     final oldJob = await disableJob(f.bEnrollment, 'Unseen epoch two');
     final oldRow = (await f.bDb.select(f.bDb.companyJobs).get()).singleWhere(
@@ -182,7 +204,7 @@ void main() {
       expectedCredentialVersion: 2,
       pin: '6789',
     );
-    await _exchangePolicy(f);
+    await _exchangePolicy(f, user.userId);
     for (final pair in [(f.a, f.aStore, f.aDb), (f.b, f.bStore, f.bDb)]) {
       await advanceJoinFloor(
         pair.$2,
@@ -194,7 +216,11 @@ void main() {
     }
     await f.aEnrollment.signIn('1234');
     await f.bEnrollment.signIn('1234');
-    expect((await f.aEnrollment.userLifecycleStatus())!.credentialVersion, 3);
+    expect(
+      (await f.aEnrollment.userLifecycleStatus(userId: user.userId))!
+          .credentialVersion,
+      3,
+    );
     final slot = companyUserNamespace(f.a.namespace);
     final before = f.aStore.states[slot]!;
     final sql = await sqlSnapshot(f.aDb);
@@ -231,7 +257,11 @@ void main() {
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
     final peers = await disablePeers(f);
-    await f.aEnrollment.acceptUserDisableReceipt(firstDelivery, peers.a);
+    await f.aEnrollment.acceptUserDisableReceipt(
+      firstDelivery,
+      peers.a,
+      userId: user.userId,
+    );
     final held = await peers.a.prepareCreateCommand(
       f.aEnrollment.currentSession!,
     );
@@ -446,11 +476,11 @@ void main() {
     );
     var p = await disablePeers(f);
     var target = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: user.userId),
       p.a,
     );
     var source = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: user.userId),
       p.b,
     );
     final policy = (await f.aEnrollment.prepareUserDisablePolicy(p.a, target))!;
@@ -462,7 +492,9 @@ void main() {
       f.bEnrollment.acceptUserDisablePolicy(malformed, p.b, source),
       throwsA(isA<CompanyBootstrapRefusal>()),
     );
-    final status = (await f.bEnrollment.userLifecycleStatus())!;
+    final status = (await f.bEnrollment.userLifecycleStatus(
+      userId: user.userId,
+    ))!;
     expect(status.credentialVersion, 2);
     expect(status.awaitingCredential, isTrue);
     await expectLater(
@@ -472,11 +504,11 @@ void main() {
     await f.bEnrollment.signIn('1234');
     p = await disablePeers(f);
     target = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: user.userId),
       p.a,
     );
     source = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: user.userId),
       p.b,
     );
     final retry = (await f.aEnrollment.prepareUserDisablePolicy(p.a, target))!;
@@ -485,9 +517,14 @@ void main() {
       p.b,
       source,
     );
-    await f.aEnrollment.acceptUserDisableReceipt(receipt, p.a);
+    await f.aEnrollment.acceptUserDisableReceipt(
+      receipt,
+      p.a,
+      userId: user.userId,
+    );
     expect(
-      (await f.bEnrollment.userLifecycleStatus())!.attemptsRemaining,
+      (await f.bEnrollment.userLifecycleStatus(userId: user.userId))!
+          .attemptsRemaining,
       status.attemptsRemaining,
     );
     await f.bEnrollment.signInUser(user.userId, '4567');
@@ -521,11 +558,11 @@ void main() {
     await f.aEnrollment.signIn('1234');
     var p = await disablePeers(f);
     var target = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: user.userId),
       p.a,
     );
     var source = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: user.userId),
       p.b,
     );
     final partial = (await f.aEnrollment.prepareUserDisablePolicy(
@@ -540,11 +577,20 @@ void main() {
       p.b,
       source,
     );
-    await f.aEnrollment.acceptUserDisableReceipt(receipt, p.a);
-    final pending = (await f.bEnrollment.userLifecycleStatus())!;
+    await f.aEnrollment.acceptUserDisableReceipt(
+      receipt,
+      p.a,
+      userId: user.userId,
+    );
+    final pending = (await f.bEnrollment.userLifecycleStatus(
+      userId: user.userId,
+    ))!;
     expect(pending.credentialVersion, 17);
     expect(pending.awaitingCredential, isTrue);
-    expect((await f.aEnrollment.userLifecycleStatus())!.confirmed, isFalse);
+    expect(
+      (await f.aEnrollment.userLifecycleStatus(userId: user.userId))!.confirmed,
+      isFalse,
+    );
     await expectLater(
       f.bEnrollment.signInUser(user.userId, '0123'),
       throwsA(isA<CompanyBootstrapRefusal>()),
@@ -552,11 +598,11 @@ void main() {
     await f.bEnrollment.signIn('1234');
     p = await disablePeers(f);
     target = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: user.userId),
       p.a,
     );
     source = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: user.userId),
       p.b,
     );
     final finalPolicy = (await f.aEnrollment.prepareUserDisablePolicy(
@@ -571,8 +617,16 @@ void main() {
       p.b,
       source,
     );
-    await f.aEnrollment.acceptUserDisableReceipt(done, p.a);
-    expect((await f.bEnrollment.userLifecycleStatus())!.credentialVersion, 18);
+    await f.aEnrollment.acceptUserDisableReceipt(
+      done,
+      p.a,
+      userId: user.userId,
+    );
+    expect(
+      (await f.bEnrollment.userLifecycleStatus(userId: user.userId))!
+          .credentialVersion,
+      18,
+    );
     await f.bEnrollment.signInUser(user.userId, '4567');
   }, timeout: const Timeout(Duration(minutes: 2)));
 
@@ -592,7 +646,7 @@ void main() {
       expectedCredentialVersion: 1,
       pin: '4567',
     );
-    await _exchangePolicy(f);
+    await _exchangePolicy(f, user.userId);
     await f.aEnrollment.disableRestrictedUser(
       owner: f.owner,
       userId: user.userId,
@@ -600,11 +654,11 @@ void main() {
     );
     final p = await disablePeers(f);
     final target = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: user.userId),
       p.a,
     );
     final source = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: user.userId),
       p.b,
     );
     final policy = (await f.aEnrollment.prepareUserDisablePolicy(p.a, target))!;
@@ -629,7 +683,9 @@ void main() {
     await f.bEnrollment.acceptUserDisablePolicy(policy, p.b, source);
     f.bStore.beforeRead = null;
     expect(decremented, isTrue);
-    final status = (await f.bEnrollment.userLifecycleStatus())!;
+    final status = (await f.bEnrollment.userLifecycleStatus(
+      userId: user.userId,
+    ))!;
     expect(status.disabled, isTrue);
     expect(status.attemptsRemaining, 7);
   }, timeout: const Timeout(Duration(seconds: 60)));
@@ -652,10 +708,13 @@ void main() {
     );
     final p = await disablePeers(f);
     final target = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: user.userId),
       p.a,
     );
-    final originalOffer = await f.aEnrollment.createUserLifecycleOffer(p.a);
+    final originalOffer = await f.aEnrollment.createUserLifecycleOffer(
+      p.a,
+      userId: user.userId,
+    );
     final source = await f.bEnrollment.verifyUserLifecycleOffer(
       originalOffer,
       p.b,
@@ -692,7 +751,8 @@ void main() {
     await f.bEnrollment.acceptUserDisablePolicy(publicReplay, p.b, verified);
     expect(f.bStore.states[slot]!.revision, before.revision);
     expect(
-      (await f.bEnrollment.userLifecycleStatus())!.awaitingCredential,
+      (await f.bEnrollment.userLifecycleStatus(userId: user.userId))!
+          .awaitingCredential,
       isFalse,
     );
     expect((await f.bDb.select(f.bDb.companyUserDeliveries).get()).length, 2);

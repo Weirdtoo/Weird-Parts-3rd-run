@@ -116,7 +116,11 @@ void main() {
     );
     expect(replay.credentialVersion, 2);
     expect(replay.isCurrent, isFalse);
-    expect((await enrollment.userLifecycleStatus())!.credentialVersion, 3);
+    expect(
+      (await enrollment.userLifecycleStatus(userId: user.userId))!
+          .credentialVersion,
+      3,
+    );
     expect(await sqlSnapshot(db), sql);
     expect(unchanged(reopened), isTrue);
   });

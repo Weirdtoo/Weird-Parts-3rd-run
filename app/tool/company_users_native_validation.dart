@@ -608,7 +608,9 @@ Future<Map<String, Object?>?> runCompanyUserDisabledApiProbe({
     if (await enrollment.readStatus() != CompanyBootstrapStatus.active) {
       throw StateError('Disabled API probe refused');
     }
-    final lifecycle = await enrollment.userLifecycleStatus();
+    final lifecycle = await enrollment.userLifecycleStatus(
+      userId: expectedUserId,
+    );
     final additional = (await enrollment.listCompanyUsers()).skip(1).toList();
     final identity = await enrollment.readIdentity();
     if (identity == null ||
@@ -908,55 +910,79 @@ Future<Map<String, Object?>> readCompanyUserValidationProjection(
       namespace != installation.namespace) {
     return {'present': false, 'available': false};
   }
-  final slot = companyUserNamespace(namespace);
-  ProtectedInstallationState? saved;
+  final saved = <int, ProtectedInstallationState?>{};
   try {
-    saved = await installation.store.readState(slot);
-  } catch (_) {
-    return {'present': true, 'available': false};
-  }
-  if (saved == null) {
-    return {'present': false, 'available': false};
-  }
-  try {
-    final lifecycle = await enrollment.userLifecycleStatus();
-    final choices = await enrollment.listCompanyUsers();
-    final additional = choices.skip(1).toList();
-    if (lifecycle == null ||
-        additional.length != 1 ||
-        additional.single.userId != lifecycle.userId ||
-        additional.single.disabled != lifecycle.disabled) {
+    for (var slot = 1; slot <= kCompanyUserCapacity; slot++) {
+      saved[slot] = await installation.store.readState(
+        companyUserNamespace(namespace, slot: slot),
+      );
+    }
+    final additional = (await enrollment.listCompanyUsers()).skip(1).toList();
+    final occupied = saved.values
+        .whereType<ProtectedInstallationState>()
+        .length;
+    if (additional.length != occupied ||
+        additional.any((user) => user.userId.isEmpty)) {
       throw const FormatException('unavailable');
     }
-    final latest = await installation.store.readState(slot);
-    if (latest == null ||
-        latest.revision != saved.revision ||
-        !_sameBytes(latest.bytes, saved.bytes)) {
-      throw const FormatException('unavailable');
+    final users = <Map<String, Object?>>[];
+    for (final choice in additional) {
+      final lifecycle = await enrollment.userLifecycleStatus(
+        userId: choice.userId,
+      );
+      if (lifecycle == null || lifecycle.disabled != choice.disabled) {
+        throw const FormatException('unavailable');
+      }
+      users.add({
+        'present': true,
+        'byteLength': lifecycle.protectedByteLength,
+        'available': choice.available,
+        'disabled': lifecycle.disabled,
+        'attemptsRemaining': lifecycle.attemptsRemaining,
+        'disableReceiptSaved': lifecycle.disabled && lifecycle.confirmed,
+        'awaitingCredential': lifecycle.awaitingCredential,
+        'credentialReceiptSaved':
+            !lifecycle.disabled &&
+            lifecycle.credentialVersion > 1 &&
+            lifecycle.confirmed,
+        'certificatePublic': {
+          'userId': choice.userId,
+          'credentialVersion': lifecycle.credentialVersion,
+          'permissionVersion': lifecycle.permissionVersion,
+        },
+      });
     }
-    final choice = additional.single;
+    // Public IDs route the projection; locator order is only used for stable rereads.
+    for (var slot = 1; slot <= kCompanyUserCapacity; slot++) {
+      final latest = await installation.store.readState(
+        companyUserNamespace(namespace, slot: slot),
+      );
+      final before = saved[slot];
+      if ((before == null) != (latest == null) ||
+          (before != null &&
+              (latest!.revision != before.revision ||
+                  !_sameBytes(latest.bytes, before.bytes)))) {
+        throw const FormatException('unavailable');
+      }
+    }
+    final sizes = saved.values
+        .whereType<ProtectedInstallationState>()
+        .map((state) => state.bytes.length)
+        .toList();
     return {
-      'present': true,
-      'byteLength': saved.bytes.length,
-      'available': choice.available,
-      'disabled': lifecycle.disabled,
-      'attemptsRemaining': lifecycle.attemptsRemaining,
-      'disableReceiptSaved': lifecycle.disabled && lifecycle.confirmed,
-      'awaitingCredential': lifecycle.awaitingCredential,
-      'credentialReceiptSaved':
-          !lifecycle.disabled &&
-          lifecycle.credentialVersion > 1 &&
-          lifecycle.confirmed,
-      'certificatePublic': {
-        'userId': choice.userId,
-        'credentialVersion': lifecycle.credentialVersion,
-        'permissionVersion': 1,
-      },
+      'present': users.isNotEmpty,
+      'available':
+          users.isNotEmpty && users.every((user) => user['available'] == true),
+      'capacity': kCompanyUserCapacity,
+      'byteLengths': sizes,
+      'users': users,
+      // Retain the existing single-user receipt fields for historical readers.
+      if (users.length == 1) ...users.single,
+      if (users.length == 1) 'byteLength': sizes.single,
     };
   } catch (_) {
     return {
-      'present': true,
-      'byteLength': saved.bytes.length,
+      'present': saved.values.any((state) => state != null),
       'available': false,
     };
   }

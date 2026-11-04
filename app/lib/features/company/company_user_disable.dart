@@ -81,7 +81,8 @@ Future<ResolvedCompanyUserAuthority> _resolveActiveUserAuthority(
   String certificateBytes,
 ) async {
   final enrollment = CompanyEnrollment(installation: installation, db: db);
-  final account = await enrollment._readUserAccount();
+  final userId = _userCertificateUserId(certificateBytes);
+  final account = await enrollment._readUserAccount(userId: userId);
   if (account == null ||
       account.certificate != certificateBytes ||
       _securityCanonical(account.binding) !=
@@ -98,7 +99,7 @@ Future<ResolvedCompanyUserAuthority> _resolveActiveUserAuthority(
   if (account.isDisabled) {
     throw const CompanyBootstrapRefusal('This company user is disabled');
   }
-  final latest = await enrollment._readUserAccount();
+  final latest = await enrollment._readUserAccount(userId: userId);
   if (latest == null ||
       latest.isDisabled ||
       latest.identityCommitment != account.identityCommitment) {
@@ -123,6 +124,8 @@ final class CompanyUserLifecycleStatus {
     this.targetDeviceId,
     this.confirmed,
     this.credentialVersion,
+    this.permissionVersion,
+    this.protectedByteLength,
     this.awaitingCredential,
   );
   final String userId;
@@ -132,6 +135,8 @@ final class CompanyUserLifecycleStatus {
   final String? targetDeviceId;
   final bool confirmed;
   final int credentialVersion;
+  final int permissionVersion;
+  final int protectedByteLength;
   final bool awaitingCredential;
 }
 
@@ -139,6 +144,8 @@ final class VerifiedUserLifecycleTarget {
   VerifiedUserLifecycleTarget._(this._bytes, this._peer);
   final String _bytes;
   final VerifiedPeerMembership _peer;
+  String get userId =>
+      ((jsonDecode(_bytes) as Map)['body'] as Map)['user'] as String;
   List<Object?> get _binding => List<Object?>.from(
     ((jsonDecode(_bytes) as Map)['body'] as Map)['binding'] as List,
   );
@@ -149,8 +156,10 @@ final class VerifiedUserLifecycleTarget {
 }
 
 extension CompanyUserDisable on CompanyEnrollment {
-  Future<CompanyUserLifecycleStatus?> userLifecycleStatus() async {
-    final account = await _readUserAccount();
+  Future<CompanyUserLifecycleStatus?> userLifecycleStatus({
+    required String userId,
+  }) async {
+    final account = await _readUserAccount(userId: userId);
     if (account == null) return null;
     final user = await _checkUserAccount(account, requireActive: false);
     final disable = account.disable;
@@ -166,12 +175,14 @@ extension CompanyUserDisable on CompanyEnrollment {
           ? account.values['r'] != null
           : disable?.receipt != null,
       user.user['credential'] as int,
+      user.user['permission'] as int,
+      account.encode().length,
       account.values['p'] == null && !account.isDisabled,
     );
   }
 
   Future<bool> isCompanyUserDisabled(String userId) async {
-    final state = await userLifecycleStatus();
+    final state = await userLifecycleStatus(userId: userId);
     return state?.userId == userId && state!.disabled;
   }
 
@@ -190,7 +201,7 @@ extension CompanyUserDisable on CompanyEnrollment {
     await _requireUserAdministrator(owner);
     return owner.runLocalCommand(() async {
       final custody = await _requireUserAdministrator(owner);
-      final account = await _readUserAccount();
+      final account = await _readUserAccount(userId: userId);
       if (account == null) {
         throw const CompanyBootstrapRefusal('User account unavailable');
       }
@@ -236,7 +247,7 @@ extension CompanyUserDisable on CompanyEnrollment {
         keyPair: await Ed25519().newKeyPairFromSeed(custody.rootSeed),
       );
       await _requireUserAdministrator(owner);
-      final latest = await _readUserAccount();
+      final latest = await _readUserAccount(userId: userId);
       if (latest == null ||
           latest.identityCommitment != account.identityCommitment ||
           latest.isDisabled) {
@@ -255,7 +266,12 @@ extension CompanyUserDisable on CompanyEnrollment {
         'p': null,
         'd': [1, requestId, base64Encode(signature.bytes), latestTarget, null],
       });
-      await _writeUserAccount(next);
+      await _writeUserAccount(
+        next,
+        requireCurrent: () async {
+          await _requireUserAdministrator(owner);
+        },
+      );
       return CompanyUserDisableReceipt._(
         userId,
         requestId,
@@ -279,16 +295,20 @@ extension CompanyUserDisable on CompanyEnrollment {
   }
 
   Future<Map<String, Object?>> createUserLifecycleOffer(
-    VerifiedPeerMembership peer,
-  ) async {
+    VerifiedPeerMembership peer, {
+    required String userId,
+  }) async {
     await _requireUserPeer(peer);
     final body = <String, Object?>{
       'v': 1,
       'kind': 'company.user.lifecycle.offer@2',
+      'profile': kCompanyUserProfile,
+      'capacity': kCompanyUserCapacity,
       'channel': peer._held.channel._keys.id,
       'request': const Uuid().v4(),
+      'user': userId,
       'binding': await _lifecycleLocalBinding(),
-      'checkpoint': await _userCheckpoint(),
+      'checkpoint': await _userCheckpoint(userId),
     };
     final signed = await _signJoin(
       installation,
@@ -308,17 +328,24 @@ extension CompanyUserDisable on CompanyEnrollment {
     final body = _joinObject(snapshot['body'], {
       'v',
       'kind',
+      'profile',
+      'capacity',
       'channel',
       'request',
+      'user',
       'binding',
       'checkpoint',
     });
     await _requireUserPeer(peer);
     _joinId(body, 'request');
+    _joinId(body, 'user');
     final binding = body['binding'];
     final member = peer._held.peer._membership;
     if (body['v'] != 1 ||
         body['kind'] != 'company.user.lifecycle.offer@2' ||
+        body['profile'] != kCompanyUserProfile ||
+        body['capacity'] is! int ||
+        body['capacity'] != kCompanyUserCapacity ||
         body['channel'] != peer._held.channel._keys.id ||
         binding is! List ||
         binding.length != 6 ||
@@ -334,6 +361,9 @@ extension CompanyUserDisable on CompanyEnrollment {
     _joinId({'id': binding[4]}, 'id');
     if (body['checkpoint'] != null) {
       final checkpoint = _stateTuple(body['checkpoint'], 3);
+      if (checkpoint[0] != body['user']) {
+        throw const CompanyBootstrapRefusal('Lifecycle user differs');
+      }
       _stateId(checkpoint[0]);
       _joinVersion(checkpoint[1]);
       _joinHash(checkpoint[2]);
@@ -358,7 +388,7 @@ extension CompanyUserDisable on CompanyEnrollment {
         'Lifecycle target belongs to another peer',
       );
     }
-    var account = await _readUserAccount();
+    var account = await _readUserAccount(userId: target.userId);
     if (account?.isCurrentState == true) {
       return _prepareUserPinPolicy(peer, target);
     }
@@ -376,6 +406,9 @@ extension CompanyUserDisable on CompanyEnrollment {
         account.change({
           'd': [...disable.identity, outgoing, null],
         }),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+        },
       );
       disable = account.disable!;
     }
@@ -387,7 +420,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       'recipient': target._binding,
     };
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: target.userId);
     if (latest?.identityCommitment != account.identityCommitment ||
         _securityCanonical(latest?.disable?.target) !=
             _securityCanonical(outgoing)) {
@@ -447,19 +480,32 @@ extension CompanyUserDisable on CompanyEnrollment {
     if (identity is! List || identity.length != 3) {
       throw const CompanyBootstrapRefusal('Unsupported disable policy');
     }
-    final existing = await _readUserAccount();
+    final accounts = await _readUserAccounts();
+    final existing = accounts.select(source.userId);
+    if (_userCertificateUserId(body['certificate'] as String) !=
+        source.userId) {
+      throw const CompanyBootstrapRefusal('Disable user differs');
+    }
     final target = <Object?>[1, ...source._binding];
-    var account = _UserAccount._({
-      'v': 2,
-      'c': body['certificate'],
-      'b': _userBinding(),
-      'p': null,
-      'a': existing?.attempts ?? _companyAttempts,
-      'o': existing?.values['o'],
-      'r': existing?.values['r'],
-      'd': [...identity, target, null],
-    }, existing?.revision);
-    account = _UserAccount.decode(account.encode(), revision: account.revision);
+    var account = _UserAccount._(
+      {
+        'v': 2,
+        'c': body['certificate'],
+        'b': _userBinding(),
+        'p': null,
+        'a': existing?.attempts ?? _companyAttempts,
+        'o': existing?.values['o'],
+        'r': existing?.values['r'],
+        'd': [...identity, target, null],
+      },
+      existing?.revision,
+      slot: existing?.slot ?? accounts.freeSlot,
+    );
+    account = _UserAccount.decode(
+      account.encode(),
+      revision: account.revision,
+      slot: account.slot,
+    );
     await _checkUserAccount(account, requireActive: false);
     _preflightUserCapacity(account);
     if (existing != null) {
@@ -478,7 +524,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       _userDisableReceiptDomain,
     );
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: source.userId);
     if ((existing == null && latest != null) ||
         (existing != null &&
             (latest?.identityCommitment != existing.identityCommitment ||
@@ -505,7 +551,14 @@ extension CompanyUserDisable on CompanyEnrollment {
         _securityCanonical(account.values) !=
             _securityCanonical(latest.values)) {
       await _writeUserAccount(
-        _UserAccount.decode(account.encode(), revision: latest?.revision),
+        _UserAccount.decode(
+          account.encode(),
+          revision: latest?.revision,
+          slot: account.slot,
+        ),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+        },
       );
     }
     return receipt;
@@ -513,18 +566,19 @@ extension CompanyUserDisable on CompanyEnrollment {
 
   Future<void> acceptUserDisableReceipt(
     Map<String, Object?>? signed,
-    VerifiedPeerMembership peer,
-  ) async {
+    VerifiedPeerMembership peer, {
+    required String userId,
+  }) async {
     if (signed == null) return;
     if ((signed['body'] as Map?)?['kind'] == 'company.user.state.receipt@1') {
-      return _acceptUserPinReceipt(signed, peer);
+      return _acceptUserPinReceipt(signed, peer, userId: userId);
     }
     final snapshot = _joinObject(_decodeUserJson(_securityCanonical(signed)), {
       'body',
       'signature',
     });
     await _requireUserPeer(peer);
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: userId);
     if (account == null ||
         account.isCurrentState ||
         !account.isDisabled ||
@@ -543,7 +597,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       _userDisableReceiptDomain,
     );
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: userId);
     if (latest?.identityCommitment != account.identityCommitment ||
         _securityCanonical(latest?.disable?.target) !=
             _securityCanonical(account.disable!.target)) {
@@ -560,6 +614,9 @@ extension CompanyUserDisable on CompanyEnrollment {
             snapshot['signature'],
           ],
         }),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+        },
       );
     }
   }

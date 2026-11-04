@@ -3,13 +3,20 @@ part of '../installation/installation_security.dart';
 const _userAuthorityDomain = 'wiredpart.company.user.authority@1:';
 const _userNameByteLimit = 64;
 
-String companyUserNamespace(String baseNamespace) {
+/// Current release capacity; storage locators are never company user identities.
+const kCompanyUserCapacity = 2;
+const kCompanyUserProfile = 'company.users.collection@1';
+
+String companyUserNamespace(String baseNamespace, {int slot = 1}) {
   validateInstallationNamespace(baseNamespace);
   if (baseNamespace.endsWith('.company-custody') ||
-      baseNamespace.endsWith('.company-user-1')) {
+      RegExp(r'\.company-user-[1-9][0-9]*$').hasMatch(baseNamespace)) {
     throw ArgumentError.value(baseNamespace, 'baseNamespace');
   }
-  final result = '$baseNamespace.company-user-1';
+  if (slot < 1 || slot > kCompanyUserCapacity) {
+    throw ArgumentError.value(slot, 'slot');
+  }
+  final result = '$baseNamespace.company-user-$slot';
   validateInstallationNamespace(result);
   return result;
 }
@@ -213,9 +220,10 @@ Future<ResolvedCompanyUserAuthority> _resolveUserAuthority(
 }
 
 final class _UserAccount {
-  _UserAccount._(this.values, this.revision);
+  _UserAccount._(this.values, this.revision, {required this.slot});
   final Map<String, Object?> values;
   final String? revision;
+  final int slot;
   bool get isCurrentState => values['v'] == 3;
   String get certificate =>
       isCurrentState ? _securityCanonical(values['c']) : values['c'] as String;
@@ -228,6 +236,7 @@ final class _UserAccount {
       : disable != null;
   int get attempts => values['a'] as int;
   String get identityCommitment => _joinDigest({
+    'locator': slot,
     'c': certificate,
     'b': binding,
     'p': values['p'],
@@ -238,6 +247,7 @@ final class _UserAccount {
       utf8.encode(_securityCanonical({...values, ...changes})),
     ),
     revision: revision,
+    slot: slot,
   );
   Uint8List encode() {
     final bytes = Uint8List.fromList(utf8.encode(_securityCanonical(values)));
@@ -249,7 +259,11 @@ final class _UserAccount {
     return bytes;
   }
 
-  static _UserAccount decode(Uint8List bytes, {String? revision}) {
+  static _UserAccount decode(
+    Uint8List bytes, {
+    String? revision,
+    required int slot,
+  }) {
     if (bytes.length > kInstallationStateLimit) {
       throw const CompanyBootstrapRefusal(
         'Protected user account capacity reached',
@@ -277,7 +291,7 @@ final class _UserAccount {
       _stateTuple(value['c'], 2);
       _stateTuple(value['b'], 4);
       if (value['p'] != null) _stateTuple(value['p'], 3);
-      return _UserAccount._(value, revision);
+      return _UserAccount._(value, revision, slot: slot);
     }
     final value = _joinObject(decoded, {
       'v',
@@ -352,7 +366,23 @@ final class _UserAccount {
         'User receipt has no provisioning identity',
       );
     }
-    return _UserAccount._(value, revision);
+    return _UserAccount._(value, revision, slot: slot);
+  }
+}
+
+final class _UserAccounts {
+  _UserAccounts(this.byUserId, this.creationRequests);
+  final Map<String, _UserAccount> byUserId;
+  final Map<String, String> creationRequests;
+
+  _UserAccount? select(String userId) => byUserId[userId];
+
+  int get freeSlot {
+    final occupied = byUserId.values.map((account) => account.slot).toSet();
+    for (var slot = 1; slot <= kCompanyUserCapacity; slot++) {
+      if (!occupied.contains(slot)) return slot;
+    }
+    throw const CompanyBootstrapRefusal('Company user capacity reached');
   }
 }
 
@@ -387,6 +417,25 @@ Object? _decodeUserJson(String text) {
   }
 }
 
+// Routing only. The selected account and supplied certificate still require
+// their existing signature, current-state and installation checks.
+String _userCertificateUserId(String certificate) {
+  final decoded = _decodeUserJson(certificate);
+  final Object? id;
+  if (decoded is List) {
+    id = _stateTuple(_stateTuple(decoded, 2)[0], 16)[5];
+  } else {
+    final signed = _joinObject(decoded, {'body', 'signature'});
+    final body = signed['body'];
+    if (body is! Map) {
+      throw const CompanyBootstrapRefusal('User certificate differs');
+    }
+    id = body['user'];
+  }
+  _stateId(id);
+  return id as String;
+}
+
 Future<Map<String, Object?>> _openUserEnvelope(
   NearbyJoinChannel channel,
   String kind,
@@ -404,10 +453,11 @@ Future<Map<String, Object?>> _openUserEnvelope(
 
 extension CompanyUsers on CompanyEnrollment {
   Future<CompanyUserProvisionStatus?> userProvisionStatus(
-    OwnerSession owner,
-  ) async {
+    OwnerSession owner, {
+    required String userId,
+  }) async {
     await _requireUserAdministrator(owner);
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: userId);
     if (account == null) return null;
     final user = await _checkUserAccount(account, requireActive: false);
     final outgoing = account.values['o'];
@@ -425,10 +475,11 @@ extension CompanyUsers on CompanyEnrollment {
   Future<Map<String, Object?>> prepareUserProvisionInvitation({
     required OwnerSession owner,
     required VerifiedPeerMembership peer,
+    required String userId,
   }) async {
     await _requireUserAdministrator(owner);
     await _requireUserPeer(peer);
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: userId);
     if (account == null) {
       throw const CompanyBootstrapRefusal('Create one additional user first');
     }
@@ -457,6 +508,8 @@ extension CompanyUsers on CompanyEnrollment {
       {
         'v': 1,
         'kind': 'company.user.provision.invite@1',
+        'profile': kCompanyUserProfile,
+        'capacity': kCompanyUserCapacity,
         'request': request,
         'certificate': account.certificate,
         'sender': owner.identity.deviceId,
@@ -480,11 +533,23 @@ extension CompanyUsers on CompanyEnrollment {
         wire,
         recipient: base64Encode(installation.identity!.publicKey),
       ),
-      {'v', 'kind', 'request', 'certificate', 'sender', 'recipient'},
+      {
+        'v',
+        'kind',
+        'profile',
+        'capacity',
+        'request',
+        'certificate',
+        'sender',
+        'recipient',
+      },
     );
     _joinId(body, 'request');
     if (body['v'] != 1 ||
         body['kind'] != 'company.user.provision.invite@1' ||
+        body['profile'] != kCompanyUserProfile ||
+        body['capacity'] is! int ||
+        body['capacity'] != kCompanyUserCapacity ||
         body['recipient'] != currentSession!.identity.deviceId ||
         body['sender'] != peer.deviceId ||
         body['certificate'] is! String) {
@@ -500,7 +565,7 @@ extension CompanyUsers on CompanyEnrollment {
       installation.knownSecurityFloors,
       body['certificate'] as String,
     );
-    final existing = await _readUserAccount();
+    final existing = await _readUserAccount(userId: user.user['id'] as String);
     if (existing != null) await _checkUserAccount(existing);
     if (user._body['device'] != peer.deviceId) {
       throw const CompanyBootstrapRefusal(
@@ -526,7 +591,7 @@ extension CompanyUsers on CompanyEnrollment {
 
   Future<void> _requireSessionAccount(CompanySession session) async {
     if (session is! RestrictedUserSession) return;
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: session.identity.userId);
     final trust = installation._record?.companyTrust;
     if (account == null ||
         trust == null ||
@@ -612,6 +677,11 @@ extension CompanyUsers on CompanyEnrollment {
     _joinId({'id': requestId}, 'id');
     _joinId({'id': userId}, 'id');
     await _requireUserPeer(peer);
+    final accounts = await _readUserAccounts();
+    if (accounts.select(userId) == null &&
+        accounts.byUserId.length >= kCompanyUserCapacity) {
+      throw const CompanyBootstrapRefusal('Company user capacity reached');
+    }
     final trust = installation._record!.companyTrust!;
     final local = await resolveCompanyMembership(
       db: db,
@@ -620,6 +690,8 @@ extension CompanyUsers on CompanyEnrollment {
     final body = <String, Object?>{
       'v': 1,
       'kind': 'company.user.provision.request@1',
+      'profile': kCompanyUserProfile,
+      'capacity': kCompanyUserCapacity,
       'company': trust.companyId.value,
       'shop': currentSession!.identity.shopId,
       'authority': trust.authorityVersion,
@@ -656,6 +728,8 @@ extension CompanyUsers on CompanyEnrollment {
     final body = _joinObject(signed['body'], {
       'v',
       'kind',
+      'profile',
+      'capacity',
       'company',
       'shop',
       'authority',
@@ -676,6 +750,9 @@ extension CompanyUsers on CompanyEnrollment {
         !Uuid.isValidUUID(fromString: binding[4] as String) ||
         body['v'] != 1 ||
         body['kind'] != 'company.user.provision.request@1' ||
+        body['profile'] != kCompanyUserProfile ||
+        body['capacity'] is! int ||
+        body['capacity'] != kCompanyUserCapacity ||
         body['company'] != trust.companyId.value ||
         body['shop'] != currentSession!.identity.shopId ||
         body['authority'] != trust.authorityVersion ||
@@ -718,7 +795,7 @@ extension CompanyUsers on CompanyEnrollment {
         request._signed,
         peer: peer,
       );
-      var account = await _readUserAccount();
+      var account = await _readUserAccount(userId: verifiedRequest.userId);
       if (account == null) {
         throw const CompanyBootstrapRefusal('No additional user to provision');
       }
@@ -746,7 +823,13 @@ extension CompanyUsers on CompanyEnrollment {
       await _requireUserAdministrator(owner);
       await _requireUserPeer(peer);
       if (account.values['o'] == null) {
-        account = await _writeUserAccount(account.change({'o': outgoing}));
+        account = await _writeUserAccount(
+          account.change({'o': outgoing}),
+          requireCurrent: () async {
+            await _requireUserAdministrator(owner);
+            await _requireUserPeer(peer);
+          },
+        );
       }
       final local = await resolveCompanyMembership(
         db: db,
@@ -777,6 +860,8 @@ extension CompanyUsers on CompanyEnrollment {
       final issuance = await _signJoin(installation, {
         'v': 1,
         'kind': 'company.user.provision.issuance@1',
+        'profile': kCompanyUserProfile,
+        'capacity': kCompanyUserCapacity,
         'company': trust.companyId.value,
         'shop': owner.identity.shopId,
         'authority': trust.authorityVersion,
@@ -790,7 +875,7 @@ extension CompanyUsers on CompanyEnrollment {
       }, 'wiredpart.company.user.provision.issuance@1:');
       await _requireUserAdministrator(owner);
       await _requireUserPeer(peer);
-      final latest = await _readUserAccount();
+      final latest = await _readUserAccount(userId: verifiedRequest.userId);
       if (latest?.identityCommitment != account.identityCommitment ||
           _securityCanonical(latest?.values['o']) !=
               _securityCanonical(outgoing)) {
@@ -841,6 +926,8 @@ extension CompanyUsers on CompanyEnrollment {
     final issuance = _joinObject(signed['body'], {
       'v',
       'kind',
+      'profile',
+      'capacity',
       'company',
       'shop',
       'authority',
@@ -868,6 +955,9 @@ extension CompanyUsers on CompanyEnrollment {
         !Uuid.isValidUUID(fromString: source[4] as String) ||
         issuance['v'] != 1 ||
         issuance['kind'] != 'company.user.provision.issuance@1' ||
+        issuance['profile'] != kCompanyUserProfile ||
+        issuance['capacity'] is! int ||
+        issuance['capacity'] != kCompanyUserCapacity ||
         issuance['company'] != trust.companyId.value ||
         issuance['shop'] != currentSession!.identity.shopId ||
         issuance['authority'] != trust.authorityVersion ||
@@ -944,6 +1034,14 @@ extension CompanyUsers on CompanyEnrollment {
         'Confirm this user provisioning request first',
       );
     }
+    final accounts = await _readUserAccounts();
+    var existing = accounts.select(selected['user'] as String);
+    final creationRequest = selected['request'] as String;
+    if (accounts.creationRequests[creationRequest] case final other?) {
+      if (other != selected['user']) {
+        throw const CompanyBootstrapRefusal('User creation request collision');
+      }
+    }
     var account = _UserAccount.decode(
       Uint8List.fromList(
         utf8.encode(
@@ -959,10 +1057,10 @@ extension CompanyUsers on CompanyEnrollment {
           }),
         ),
       ),
+      slot: existing?.slot ?? accounts.freeSlot,
     );
     await _checkUserAccount(account);
     _preflightUserCapacity(account);
-    var existing = await _readUserAccount();
     if (existing != null) {
       await _checkUserAccount(existing);
       if (existing.identityCommitment != account.identityCommitment ||
@@ -981,7 +1079,7 @@ extension CompanyUsers on CompanyEnrollment {
       'wiredpart.company.user.provision.receipt@1:',
     );
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: selected['user'] as String);
     if (existing == null && latest != null) {
       throw const CompanyBootstrapRefusal(
         'User account changed during provisioning',
@@ -1006,6 +1104,14 @@ extension CompanyUsers on CompanyEnrollment {
     if (account.values['r'] != receipt['signature']) {
       account = await _writeUserAccount(
         account.change({'r': receipt['signature']}),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+          if (offerSnapshot != _userProvisionOffer) {
+            throw const CompanyBootstrapRefusal(
+              'User provisioning consent changed',
+            );
+          }
+        },
       );
     }
     return _sealJoin(
@@ -1020,6 +1126,7 @@ extension CompanyUsers on CompanyEnrollment {
   Future<void> acceptUserProvisionReceipt(
     Map<String, Object?> wire, {
     required VerifiedPeerMembership peer,
+    required String userId,
   }) async {
     await _requireUserPeer(peer);
     final channel = await _userChannel(peer);
@@ -1032,7 +1139,7 @@ extension CompanyUsers on CompanyEnrollment {
       ),
       {'body', 'signature'},
     );
-    var account = await _readUserAccount();
+    var account = await _readUserAccount(userId: userId);
     if (account == null ||
         account.values['o'] is! List ||
         (account.values['o'] as List)[0] != 0) {
@@ -1051,7 +1158,7 @@ extension CompanyUsers on CompanyEnrollment {
       'wiredpart.company.user.provision.receipt@1:',
     );
     await _requireUserPeer(peer);
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: userId);
     if (latest == null ||
         latest.identityCommitment != account.identityCommitment ||
         _securityCanonical(latest.values['o']) !=
@@ -1062,27 +1169,67 @@ extension CompanyUsers on CompanyEnrollment {
     await _checkUserAccount(account);
     await _requireUserPeer(peer);
     if (account.values['r'] != signed['signature']) {
-      await _writeUserAccount(account.change({'r': signed['signature']}));
+      await _writeUserAccount(
+        account.change({'r': signed['signature']}),
+        requireCurrent: () async {
+          await _requireUserPeer(peer);
+        },
+      );
     }
   }
 
-  Future<_UserAccount?> _readUserAccount({bool reconcile = true}) async {
+  Future<_UserAccounts> _readUserAccounts({bool reconcile = true}) async {
     try {
-      final state = await installation.store.readState(
-        companyUserNamespace(installation.namespace),
+      final accounts = <String, _UserAccount>{};
+      final requests = <String, String>{};
+      for (var slot = 1; slot <= kCompanyUserCapacity; slot++) {
+        final state = await installation.store.readState(
+          companyUserNamespace(installation.namespace, slot: slot),
+        );
+        if (state == null) continue;
+        final account = _UserAccount.decode(
+          state.bytes,
+          revision: state.revision,
+          slot: slot,
+        );
+        final authority = await _checkUserAccount(
+          account,
+          requireActive: false,
+          requireJournal: false,
+        );
+        final user = authority.user['id'] as String;
+        final request = authority._body['request'] as String;
+        if (accounts.containsKey(user) || requests.containsKey(request)) {
+          throw const CompanyBootstrapRefusal(
+            'Protected user identity or creation request collision',
+          );
+        }
+        accounts[user] = account;
+        requests[request] = user;
+      }
+      if (reconcile) {
+        for (final user in accounts.keys.toList()) {
+          final account = accounts[user]!;
+          if (account.isCurrentState) {
+            accounts[user] = await _reconcileUserPinState(account);
+          }
+        }
+      }
+      return _UserAccounts(
+        Map.unmodifiable(accounts),
+        Map.unmodifiable(requests),
       );
-      final account = state == null
-          ? null
-          : _UserAccount.decode(state.bytes, revision: state.revision);
-      return account != null && account.isCurrentState && reconcile
-          ? await _reconcileUserPinState(account)
-          : account;
     } on CompanyBootstrapRefusal {
       rethrow;
     } catch (_) {
       throw const CompanyBootstrapRefusal('Protected user account unavailable');
     }
   }
+
+  Future<_UserAccount?> _readUserAccount({
+    required String userId,
+    bool reconcile = true,
+  }) async => (await _readUserAccounts(reconcile: reconcile)).select(userId);
 
   List<Object?> _userBinding() => [
     installation.identity!.id.value,
@@ -1094,26 +1241,34 @@ extension CompanyUsers on CompanyEnrollment {
   Future<ResolvedCompanyUserAuthority> _checkUserAccount(
     _UserAccount account, {
     bool requireActive = true,
+    bool requireJournal = true,
   }) async {
     final custody = await _readCustody();
     if (custody == null) {
       throw const CompanyBootstrapRefusal('Company is unavailable');
     }
-    await _checkBinding(custody, requireActive: true);
+    final heldCommand =
+        db.hasCallerTransaction && installation._record?.pendingCommand != null;
+    final trust = await _userStateTrust();
+    if (heldCommand) {
+      await _checkCurrentBinding(custody, requireActive: true);
+    } else {
+      await _checkBinding(custody, requireActive: true);
+    }
     if (_securityCanonical(account.binding) !=
         _securityCanonical(_userBinding())) {
       throw const CompanyBootstrapRefusal(
         'User unavailable on this installation',
       );
     }
-    final trust = (await installation.readCompanyTrust(db))!;
     if (account.isCurrentState) {
-      await CompanyUserStateRecord.decode(
+      await CompanyUserStateRecord._decode(
         account.encode(),
         db: db,
         installation: installation,
+        heldTrust: trust,
       );
-      await _requireUserJournal(account);
+      if (requireJournal) await _requireUserJournal(account);
     }
     final user = await _resolveUserAuthority(
       db,
@@ -1149,10 +1304,36 @@ extension CompanyUsers on CompanyEnrollment {
     }).encode();
   }
 
-  Future<_UserAccount> _writeUserAccount(_UserAccount next) async {
+  Future<_UserAccount> _writeUserAccount(
+    _UserAccount next, {
+    required Future<void> Function() requireCurrent,
+  }) async {
+    final accounts = await _readUserAccounts(reconcile: false);
+    final authority = await _checkUserAccount(
+      next,
+      requireActive: false,
+      requireJournal: false,
+    );
+    final userId = authority.user['id'] as String;
+    final creationRequest = authority._body['request'] as String;
+    final selected = accounts.select(userId);
+    final requestOwner = accounts.creationRequests[creationRequest];
+    if ((selected != null && selected.slot != next.slot) ||
+        (requestOwner != null && requestOwner != userId) ||
+        accounts.byUserId.entries.any(
+          (entry) => entry.key != userId && entry.value.slot == next.slot,
+        )) {
+      throw const CompanyBootstrapRefusal(
+        'Protected user locator or creation request changed',
+      );
+    }
     final bytes = next.encode();
     final revision = const Uuid().v4();
-    final namespace = companyUserNamespace(installation.namespace);
+    final namespace = companyUserNamespace(
+      installation.namespace,
+      slot: next.slot,
+    );
+    await requireCurrent();
     try {
       await installation.store.compareAndSwapState(
         namespace,
@@ -1168,7 +1349,7 @@ extension CompanyUsers on CompanyEnrollment {
         rethrow;
       }
     }
-    return _UserAccount.decode(bytes, revision: revision);
+    return _UserAccount.decode(bytes, revision: revision, slot: next.slot);
   }
 
   Future<_CompanyCustody> _requireUserAdministrator(OwnerSession owner) async {
@@ -1224,8 +1405,8 @@ extension CompanyUsers on CompanyEnrollment {
       ),
     ];
     try {
-      final account = await _readUserAccount();
-      if (account != null) {
+      final accounts = await _readUserAccounts();
+      for (final account in accounts.byUserId.values) {
         final user = await _checkUserAccount(account, requireActive: false);
         result.add(
           CompanyUserChoice._(
@@ -1267,7 +1448,9 @@ extension CompanyUsers on CompanyEnrollment {
     await _requireUserAdministrator(owner);
     return owner.runLocalCommand(() async {
       final custody = await _requireUserAdministrator(owner);
-      final existing = await _readUserAccount();
+      final accounts = await _readUserAccounts();
+      final existingId = accounts.creationRequests[requestId];
+      final existing = existingId == null ? null : accounts.select(existingId);
       if (existing != null) {
         final authority = await _checkUserAccount(existing);
         if (authority._body['request'] != requestId ||
@@ -1278,12 +1461,13 @@ extension CompanyUsers on CompanyEnrollment {
           );
         }
         await _requireUserAdministrator(owner);
-        final latest = await _readUserAccount();
+        final latest = await _readUserAccount(userId: existingId!);
         if (latest?.identityCommitment != existing.identityCommitment) {
           throw const CompanyBootstrapRefusal('User account changed');
         }
         return CompanyUserReceipt._(existing.certificate, authority._body);
       }
+      final slot = accounts.freeSlot;
       final trust = installation._record!.companyTrust!;
       final body = <String, Object?>{
         'v': 1,
@@ -1302,19 +1486,23 @@ extension CompanyUsers on CompanyEnrollment {
         'device': custody.device,
       };
       final salt = _secureRandom(16);
-      var account = _UserAccount._({
-        'v': 2,
-        'd': null,
-        'c': _securityCanonical({
-          'body': body,
-          'signature': base64Encode(List<int>.filled(64, 255)),
-        }),
-        'b': _userBinding(),
-        'p': [1, base64Encode(salt), base64Encode(List<int>.filled(32, 255))],
-        'a': _companyAttempts,
-        'o': null,
-        'r': null,
-      }, null);
+      var account = _UserAccount._(
+        {
+          'v': 2,
+          'd': null,
+          'c': _securityCanonical({
+            'body': body,
+            'signature': base64Encode(List<int>.filled(64, 255)),
+          }),
+          'b': _userBinding(),
+          'p': [1, base64Encode(salt), base64Encode(List<int>.filled(32, 255))],
+          'a': _companyAttempts,
+          'o': null,
+          'r': null,
+        },
+        null,
+        slot: slot,
+      );
       _preflightUserCapacity(account);
       final verifier = await _deriveCompanySecret(pin, salt);
       await _requireUserAdministrator(owner);
@@ -1332,7 +1520,12 @@ extension CompanyUsers on CompanyEnrollment {
       await _requireUserAdministrator(owner);
       await _checkUserAccount(account);
       await _requireUserAdministrator(owner);
-      await _writeUserAccount(account);
+      await _writeUserAccount(
+        account,
+        requireCurrent: () async {
+          await _requireUserAdministrator(owner);
+        },
+      );
       return CompanyUserReceipt._(account.certificate, body);
     });
   }
@@ -1359,7 +1552,7 @@ extension CompanyUsers on CompanyEnrollment {
       throw const CompanyBootstrapRefusal('User sign-in was cancelled');
     }
     if (custody?.user == userId) return signIn(pin);
-    var account = await _readUserAccount();
+    var account = await _readUserAccount(userId: userId);
     if (account == null) {
       throw const CompanyBootstrapRefusal('User is not available locally');
     }
@@ -1371,6 +1564,11 @@ extension CompanyUsers on CompanyEnrollment {
     }
     account = await _writeUserAccount(
       account.change({'a': account.attempts - 1}),
+      requireCurrent: () async {
+        if (epoch != _authenticationEpoch) {
+          throw const CompanyBootstrapRefusal('User sign-in was cancelled');
+        }
+      },
     );
     final pattern = installation.namespace.startsWith('synthetic.')
         ? RegExp(r'^\d{4,12}$')
@@ -1378,20 +1576,27 @@ extension CompanyUsers on CompanyEnrollment {
     if (!pattern.hasMatch(pin) || !await _userPinMatches(account, pin)) {
       throw const CompanyBootstrapRefusal('User PIN refused');
     }
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: userId);
     if (latest == null ||
         latest.identityCommitment != account.identityCommitment ||
         epoch != _authenticationEpoch) {
       throw const CompanyBootstrapRefusal('User sign-in was cancelled');
     }
     await _checkUserAccount(latest);
-    account = await _writeUserAccount(latest.change({'a': _companyAttempts}));
+    account = await _writeUserAccount(
+      latest.change({'a': _companyAttempts}),
+      requireCurrent: () async {
+        if (epoch != _authenticationEpoch) {
+          throw const CompanyBootstrapRefusal('User sign-in was cancelled');
+        }
+      },
+    );
     await _checkUserAccount(account);
     if (epoch != _authenticationEpoch) {
       throw const CompanyBootstrapRefusal('User sign-in was cancelled');
     }
     final current = (await _readCustody())!;
-    final selected = await _readUserAccount();
+    final selected = await _readUserAccount(userId: userId);
     if (selected == null ||
         selected.isDisabled ||
         selected.identityCommitment != account.identityCommitment) {
@@ -1431,7 +1636,7 @@ extension CompanyUsers on CompanyEnrollment {
     RestrictedUserSession session,
     _CompanyCustody custody,
   ) async {
-    final account = await _readUserAccount();
+    final account = await _readUserAccount(userId: session.identity.userId);
     if (account == null ||
         session._accountCommitment != account.identityCommitment) {
       throw const CompanyBootstrapRefusal('User account is unavailable');
@@ -1488,7 +1693,7 @@ extension CompanyUsers on CompanyEnrollment {
       'userAuthority': account.certificate,
       if (custody.isMember) 'membership': membership.certificateBytes,
     };
-    final latest = await _readUserAccount();
+    final latest = await _readUserAccount(userId: session.identity.userId);
     if (latest?.identityCommitment != account.identityCommitment) {
       throw const CompanyBootstrapRefusal('User account changed');
     }

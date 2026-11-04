@@ -990,6 +990,13 @@ final class CompanyEnrollment {
     required bool requireActive,
   }) async {
     await installation.reconcile(db);
+    await _checkCurrentBinding(custody, requireActive: requireActive);
+  }
+
+  Future<void> _checkCurrentBinding(
+    _CompanyCustody custody, {
+    required bool requireActive,
+  }) async {
     final pendingContinuation = !requireActive && custody.status == 'pending';
     if (installation.readiness != InstallationReadiness.ready &&
         !pendingContinuation) {

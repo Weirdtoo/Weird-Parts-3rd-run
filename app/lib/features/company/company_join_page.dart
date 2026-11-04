@@ -44,6 +44,12 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
   CompanyCreatedJobSync? _jobSync;
   UserProvisionInvitation? _userInvitation;
   bool _userTransferPending = false;
+  String? _userTransferUserId;
+  VerifiedPeerMembership? _userTransferPeer;
+  List<CompanyUserChoice> _provisionUsers = const [];
+  String? _provisionUserId;
+  CompanyUserProvisionStatus? _provisionStatus;
+  int _provisionSelectionEpoch = 0;
   bool _additionalUserDisabled = false;
   bool _userReceiving = false;
   Timer? _jobAvailabilityTimer;
@@ -56,6 +62,13 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
   bool _confirmed = false;
   bool _closed = false;
   bool get _approving => widget.approver != null && !widget.reconnect;
+
+  String _provisionLabel(CompanyUserChoice user) {
+    final duplicateName =
+        _provisionUsers.where((other) => other.name == user.name).length > 1;
+    return '${user.name} — ${duplicateName ? '${user.userId} — ' : ''}'
+        'Create Job only${user.disabled ? ' (disabled)' : ''}';
+  }
 
   @override
   void initState() {
@@ -81,21 +94,22 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
         final peers = await _authentication.retainedPeers(
           session: widget.approver!,
         );
-        final provisioning = widget.approver!.identity.isAuthorityOwner
-            ? await widget.enrollment.userProvisionStatus(widget.approver!)
-            : null;
+        final users = widget.approver!.identity.isAuthorityOwner
+            ? await widget.enrollment.listCompanyUsers()
+            : <CompanyUserChoice>[];
         if (mounted) {
           setState(() {
             _retained = peers;
-            _additionalUserDisabled = provisioning?.disabled == true;
-            if (provisioning?.targetDeviceId case final target?) {
-              _status = provisioning!.disabled
-                  ? (provisioning.confirmed
-                        ? 'Additional user disabled. The retained installation confirmed the decision.'
-                        : 'Additional user disabled here. Verify the retained peer and Sync Now to deliver the decision. Remote confirmation is pending.')
-                  : provisioning.confirmed
-                  ? 'Additional user provisioning was confirmed by $target. A repeated transfer preserves its PIN attempts.'
-                  : 'Additional user provisioning to $target is pending. Verify that same peer and retry the additional user transfer.';
+            final additional = users.skip(1).toList();
+            if (additional.every(
+                  (user) =>
+                      user.userId.isNotEmpty &&
+                      user.capabilities.length == 1 &&
+                      user.capabilities.single == 'createJob',
+                ) &&
+                users.map((user) => user.userId).toSet().length ==
+                    users.length) {
+              _provisionUsers = additional;
             }
           });
         }
@@ -117,6 +131,8 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
     _peerMembership = null;
     _userInvitation = null;
     _userTransferPending = false;
+    _userTransferUserId = null;
+    _userTransferPeer = null;
     _channel = null;
     _pair = pair;
     _request = null;
@@ -323,6 +339,17 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
     }
   }
 
+  void _requireTransferPeer(VerifiedPeerMembership peer, [String? userId]) {
+    if (!mounted ||
+        _closed ||
+        !identical(_peerMembership, peer) ||
+        (userId != null &&
+            (_userTransferUserId != userId ||
+                !identical(_userTransferPeer, peer)))) {
+      throw const CompanyBootstrapRefusal('Selected user transfer changed');
+    }
+  }
+
   Future<Map<String, Object?>> _receiveUser(Map<String, Object?> wire) async {
     final peer = _peerMembership;
     if (peer == null || _userReceiving || (_jobSync?.isRunning ?? false)) {
@@ -335,24 +362,43 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
       if (wire['kind'] == 'user-provision-invite') {
         final invitation = await widget.enrollment
             .receiveUserProvisionInvitation(wire, peer: peer);
+        _requireTransferPeer(peer);
+        if (_userTransferPending && _userTransferUserId != invitation.userId) {
+          throw const CompanyBootstrapRefusal(
+            'Finish the selected user transfer first',
+          );
+        }
         if (mounted) {
           setState(() {
             _userInvitation = invitation;
             _userTransferPending = true;
+            _userTransferUserId = invitation.userId;
+            _userTransferPeer = peer;
             _status =
                 'The company owner offers ${invitation.name}. Confirm to make this user available offline.';
           });
         }
       } else if (wire['kind'] == 'user-provision-request') {
+        final target = _userTransferUserId;
+        if (target == null || !identical(_userTransferPeer, peer)) {
+          throw const CompanyBootstrapRefusal(
+            'No selected user transfer is pending',
+          );
+        }
         final request = await widget.enrollment.receiveUserProvisionRequest(
           Map<String, Object?>.from(wire['data'] as Map),
           peer: peer,
         );
+        _requireTransferPeer(peer, target);
+        if (request.userId != target) {
+          throw const CompanyBootstrapRefusal('User transfer target differs');
+        }
         final provision = await widget.enrollment.prepareUserProvision(
           owner: widget.approver!,
           peer: peer,
           request: request,
         );
+        _requireTransferPeer(peer, target);
         unawaited(
           _sendPeerReply({'kind': 'user-provision-bundle', 'data': provision}),
         );
@@ -363,10 +409,20 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
           });
         }
       } else if (wire['kind'] == 'user-provision-bundle') {
+        final target = _userTransferUserId;
+        final invitation = _userInvitation;
+        if (target == null ||
+            (invitation != null && invitation.userId != target) ||
+            !identical(_userTransferPeer, peer)) {
+          throw const CompanyBootstrapRefusal(
+            'No accepted user transfer is pending',
+          );
+        }
         final ack = await widget.enrollment.acceptUserProvision(
           Map<String, Object?>.from(wire['data'] as Map),
           peer: peer,
         );
+        _requireTransferPeer(peer, target);
         unawaited(_sendPeerReply(ack));
         if (mounted) {
           setState(() {
@@ -376,10 +432,26 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
           });
         }
       } else {
-        await widget.enrollment.acceptUserProvisionReceipt(wire, peer: peer);
+        final target = _userTransferUserId;
+        if (target == null || !identical(_userTransferPeer, peer)) {
+          throw const CompanyBootstrapRefusal(
+            'No selected user receipt is pending',
+          );
+        }
+        await widget.enrollment.acceptUserProvisionReceipt(
+          wire,
+          peer: peer,
+          userId: target,
+        );
+        final status = await widget.enrollment.userProvisionStatus(
+          widget.approver!,
+          userId: target,
+        );
+        _requireTransferPeer(peer, target);
         if (mounted) {
           setState(() {
             _userTransferPending = false;
+            _provisionStatus = status;
             _status = 'The retained installation confirmed the additional user is saved. Repeating this transfer preserves PIN attempts.';
           });
         }
@@ -392,22 +464,89 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
 
   Future<void> _provisionUser() async {
     final peer = _peerMembership;
-    if (peer == null || _userReceiving || (_jobSync?.isRunning ?? false)) {
+    final target = _provisionUserId;
+    final status = _provisionStatus;
+    if (peer == null ||
+        target == null ||
+        status == null ||
+        status.userId != target ||
+        status.disabled ||
+        _userReceiving ||
+        (_jobSync?.isRunning ?? false) ||
+        (_userTransferPending &&
+            (_userTransferUserId != target ||
+                !identical(_userTransferPeer, peer)))) {
       throw const CompanyBootstrapRefusal(
         'Verify this retained peer and finish the current Job exchange first',
       );
     }
-    final invitation = await widget.enrollment.prepareUserProvisionInvitation(
-      owner: widget.approver!,
-      peer: peer,
-    );
+    final alreadyPending = _userTransferPending;
+    _userTransferUserId = target;
+    _userTransferPeer = peer;
+    _userTransferPending = true;
+    late final Map<String, Object?> invitation;
+    try {
+      invitation = await widget.enrollment.prepareUserProvisionInvitation(
+        owner: widget.approver!,
+        peer: peer,
+        userId: target,
+      );
+      _requireTransferPeer(peer, target);
+    } catch (_) {
+      if (!alreadyPending &&
+          _userTransferUserId == target &&
+          identical(_userTransferPeer, peer)) {
+        _userTransferPending = false;
+        _userTransferUserId = null;
+        _userTransferPeer = null;
+      }
+      rethrow;
+    }
     await _controller.sendJoinMessage(invitation);
-    if (mounted) {
+    if (mounted &&
+        !_closed &&
+        identical(_peerMembership, peer) &&
+        _userTransferUserId == target &&
+        _userTransferPending) {
       setState(() {
         _userTransferPending = true;
         _status = 'Waiting for the other installation to confirm the additional user. After interruption, reconnect and retry this transfer.';
       });
     }
+  }
+
+  Future<void> _selectProvisionUser(String? userId) async {
+    if (_busy ||
+        _userReceiving ||
+        _userTransferPending ||
+        (_jobSync?.isRunning ?? false) ||
+        !_provisionUsers.any((user) => user.userId == userId)) {
+      return;
+    }
+    final epoch = ++_provisionSelectionEpoch;
+    setState(() {
+      _provisionUserId = userId;
+      _provisionStatus = null;
+      _userTransferUserId = null;
+      _userTransferPeer = null;
+      _additionalUserDisabled = false;
+    });
+    await _run(() async {
+      final status = await widget.enrollment.userProvisionStatus(
+        widget.approver!,
+        userId: userId!,
+      );
+      if (mounted &&
+          !_closed &&
+          epoch == _provisionSelectionEpoch &&
+          userId == _provisionUserId &&
+          status?.userId == userId) {
+        setState(() {
+          _provisionStatus = status;
+          _additionalUserDisabled = status!.disabled;
+        });
+      }
+    });
   }
 
   Future<void> _acceptUserInvitation() async {
@@ -726,11 +865,49 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
             ),
             if (_peerMembership != null &&
                 widget.approver!.identity.isAuthorityOwner &&
-                !_additionalUserDisabled)
+                _provisionUsers.isNotEmpty) ...[
+              DropdownButtonFormField<String>(
+                key: const Key('company-provision-user-selector'),
+                isExpanded: true,
+                isDense: false,
+                itemHeight: null,
+                initialValue: _provisionUserId,
+                decoration: const InputDecoration(
+                  labelText: 'Additional user to provision',
+                ),
+                items: [
+                  for (final user in _provisionUsers)
+                    DropdownMenuItem(
+                      value: user.userId,
+                      child: Text(_provisionLabel(user)),
+                    ),
+                ],
+                onChanged:
+                    _busy ||
+                        _userReceiving ||
+                        _userTransferPending ||
+                        (_jobSync?.isRunning ?? false)
+                    ? null
+                    : (value) => _selectProvisionUser(value),
+              ),
+              if (_provisionStatus case final status?)
+                Text(
+                  status.disabled
+                      ? 'Selected user is disabled. Reconnect and Sync Now to deliver the decision.'
+                      : status.targetDeviceId == null
+                      ? 'Selected user has not been provisioned to a retained peer.'
+                      : status.confirmed
+                      ? 'Selected user provisioning is confirmed. Repeating it preserves PIN attempts.'
+                      : 'Selected user provisioning is pending. Retry with the same retained peer.',
+                ),
               OutlinedButton(
                 key: const Key('company-user-provision'),
                 onPressed:
-                    _busy || _userReceiving || (_jobSync?.isRunning ?? false)
+                    _busy ||
+                        _userReceiving ||
+                        (_jobSync?.isRunning ?? false) ||
+                        _provisionStatus == null ||
+                        _additionalUserDisabled
                     ? null
                     : () => _run(_provisionUser),
                 child: Text(
@@ -739,6 +916,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
                       : 'Provision additional user to this peer',
                 ),
               ),
+            ],
             if (_userInvitation case final invitation?) ...[
               Text(
                 'Additional user: ${invitation.name}. Create Job permission only.',

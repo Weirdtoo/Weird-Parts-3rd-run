@@ -62,11 +62,11 @@ void main() {
     );
     final p = await disablePeers(f);
     final target = await f.aEnrollment.verifyUserLifecycleOffer(
-      await f.bEnrollment.createUserLifecycleOffer(p.b),
+      await f.bEnrollment.createUserLifecycleOffer(p.b, userId: user.userId),
       p.a,
     );
     final source = await f.bEnrollment.verifyUserLifecycleOffer(
-      await f.aEnrollment.createUserLifecycleOffer(p.a),
+      await f.aEnrollment.createUserLifecycleOffer(p.a, userId: user.userId),
       p.b,
     );
     final policy = (await f.aEnrollment.prepareUserDisablePolicy(p.a, target))!;
@@ -76,9 +76,20 @@ void main() {
       p.b,
       source,
     );
-    await f.aEnrollment.acceptUserDisableReceipt(receipt, p.a);
-    expect((await f.bEnrollment.userLifecycleStatus())!.credentialVersion, 3);
-    expect((await f.aEnrollment.userLifecycleStatus())!.confirmed, isTrue);
+    await f.aEnrollment.acceptUserDisableReceipt(
+      receipt,
+      p.a,
+      userId: user.userId,
+    );
+    expect(
+      (await f.bEnrollment.userLifecycleStatus(userId: user.userId))!
+          .credentialVersion,
+      3,
+    );
+    expect(
+      (await f.aEnrollment.userLifecycleStatus(userId: user.userId))!.confirmed,
+      isTrue,
+    );
     await expectLater(
       f.bEnrollment.signInUser(user.userId, '0123'),
       throwsA(isA<CompanyBootstrapRefusal>()),

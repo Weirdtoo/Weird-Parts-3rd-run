@@ -42,7 +42,26 @@ final class CompanyJobSyncAvailability implements NearbyCompanyDisclosure {
 
 const _syncKind = 'created-jobs';
 const _syncProtocol = 'company.job.sync@7';
-const _syncActorProfile = 'company.user.state@1/job.create.authorization@4';
+const _syncActorProfile = '$kCompanyUserProfile/job.create.authorization@4';
+
+Set<String> _syncUserRoster(Object? value) {
+  if (value is! List || value.length > kCompanyUserCapacity) {
+    throw const CompanyBootstrapRefusal('Unsupported user roster capacity');
+  }
+  final result = <String>{};
+  for (final id in value) {
+    _stateId(id);
+    if (!result.add(id as String)) {
+      throw const CompanyBootstrapRefusal('Duplicate company user in roster');
+    }
+  }
+  final sorted = result.toList()..sort();
+  if (_securityCanonical(sorted) != _securityCanonical(value)) {
+    throw const CompanyBootstrapRefusal('Company user roster order differs');
+  }
+  return result;
+}
+
 const _syncAckDomain = 'wiredpart.company.job.create.ack@1:';
 const _nameSyncAckDomain = 'wiredpart.company.job.name.ack@1:';
 const _lifecycleSyncAckDomain = 'wiredpart.company.job.lifecycle.ack@1:';
@@ -621,6 +640,37 @@ final class CompanyCreatedJobSync {
   String? _lifecycleReadyRun;
   bool _lifecycleMore = false;
   VerifiedUserLifecycleTarget? _lifecycleTarget;
+  Set<String> _lifecycleUsers = {};
+  Set<String> _lifecycleLocalUsers = {};
+  Set<String> _lifecycleRemoteUsers = {};
+  final Set<String> _lifecycleFinished = {};
+
+  Future<List<String>> _localUserRoster() async {
+    final accounts = await availability.enrollment._readUserAccounts();
+    return accounts.byUserId.keys.toList()..sort();
+  }
+
+  Future<void> _requireUserRoster(Set<String> expected) async {
+    final actual = (await _localUserRoster()).toSet();
+    if (actual.length != expected.length || !actual.containsAll(expected)) {
+      throw const CompanyBootstrapRefusal('Company user roster changed');
+    }
+  }
+
+  Future<Set<String>> _policyUserRoster(
+    Set<String> before,
+    String targetUserId,
+  ) async {
+    final actual = (await _localUserRoster()).toSet();
+    final allowed = {...before, targetUserId};
+    if (!actual.containsAll(before) || !allowed.containsAll(actual)) {
+      throw const CompanyBootstrapRefusal(
+        'Company user roster changed during policy',
+      );
+    }
+    return actual;
+  }
+
   final Set<String> _heldJobKeys = {};
   final Set<String> _heldCreationJobs = {};
   int get _heldJobs => _heldJobKeys.length;
@@ -1332,21 +1382,40 @@ final class CompanyCreatedJobSync {
     final body = await _open(wire);
     final action = body['action'];
     if (action == 'profile') {
-      final data = _joinObject(body['data'], {'profile'});
-      if (data['profile'] != _syncActorProfile || _activeRun != null) {
+      final data = _joinObject(body['data'], {'profile', 'capacity', 'users'});
+      if (data['profile'] != _syncActorProfile ||
+          data['capacity'] is! int ||
+          data['capacity'] != kCompanyUserCapacity ||
+          _activeRun != null) {
         throw const CompanyBootstrapRefusal(
           'Unsupported or busy Job user profile',
         );
       }
+      final remoteUsers = _syncUserRoster(data['users']);
+      final localUsers = await _localUserRoster();
+      final users = {...remoteUsers, ...localUsers};
+      if (users.length > kCompanyUserCapacity) {
+        throw const CompanyBootstrapRefusal(
+          'Company user roster exceeds capacity',
+        );
+      }
+      _lifecycleUsers = users;
+      _lifecycleRemoteUsers = remoteUsers;
+      _lifecycleLocalUsers = localUsers.toSet();
+      _lifecycleFinished.clear();
       _lifecycleProfileRun = body['run'] as String;
-      _lifecycleReadyRun = null;
+      _lifecycleReadyRun = users.isEmpty ? body['run'] as String : null;
       _lifecyclePolicyRun = null;
       _lifecycleTarget = null;
       _lifecycleMore = false;
       return _seal(wire['request'] as String, {
         'action': 'profile.reply',
         'run': body['run'],
-        'data': {'profile': _syncActorProfile},
+        'data': {
+          'profile': _syncActorProfile,
+          'capacity': kCompanyUserCapacity,
+          'users': localUsers,
+        },
       });
     }
     if (action == 'policyOffer' ||
@@ -1358,6 +1427,7 @@ final class CompanyCreatedJobSync {
         );
       }
       final data = Map<String, Object?>.from(body['data'] as Map);
+      await _requireUserRoster(_lifecycleLocalUsers);
       final peer = availability.peer;
       final enrollment = availability.enrollment;
       Map<String, Object?> result;
@@ -1367,7 +1437,22 @@ final class CompanyCreatedJobSync {
           Map<String, Object?>.from(data['offer'] as Map),
           peer,
         );
-        result = {'offer': await enrollment.createUserLifecycleOffer(peer)};
+        final userId = _lifecycleTarget!.userId;
+        if (!_lifecycleUsers.contains(userId) ||
+            _lifecycleFinished.contains(userId) ||
+            (_lifecycleRemoteUsers.contains(userId) &&
+                _lifecycleTarget!._checkpoint == null)) {
+          throw const CompanyBootstrapRefusal(
+            'Lifecycle user is outside the negotiated roster',
+          );
+        }
+        _lifecyclePolicyRun = null;
+        result = {
+          'offer': await enrollment.createUserLifecycleOffer(
+            peer,
+            userId: userId,
+          ),
+        };
       } else {
         final target = _lifecycleTarget;
         if (target == null) {
@@ -1387,10 +1472,15 @@ final class CompanyCreatedJobSync {
             target,
           );
           _lifecycleMore =
+              _lifecycleMore ||
               (data['policy'] is Map &&
                   (data['policy'] as Map)['more'] == true) ||
               outgoingPolicy?['more'] == true;
           result = {'receipt': receipt, 'policy': outgoingPolicy};
+          _lifecycleLocalUsers = await _policyUserRoster(
+            _lifecycleLocalUsers,
+            target.userId,
+          );
           _lifecyclePolicyRun = body['run'] as String;
         } else {
           if (_lifecyclePolicyRun != body['run']) {
@@ -1404,8 +1494,14 @@ final class CompanyCreatedJobSync {
                 ? null
                 : Map<String, Object?>.from(data['receipt'] as Map),
             peer,
+            userId: target.userId,
           );
-          if (!_lifecycleMore) _lifecycleReadyRun = body['run'] as String;
+          _lifecycleFinished.add(target.userId);
+          await _requireUserRoster(_lifecycleLocalUsers);
+          if (!_lifecycleMore &&
+              _lifecycleFinished.containsAll(_lifecycleUsers)) {
+            _lifecycleReadyRun = body['run'] as String;
+          }
           result = {};
         }
       }
@@ -1418,6 +1514,7 @@ final class CompanyCreatedJobSync {
     }
     late _CreatedJobRun run;
     if (action == 'start') {
+      await _requireUserRoster(_lifecycleLocalUsers);
       if (_lifecycleReadyRun != body['run']) {
         throw const CompanyBootstrapRefusal(
           'Persist compatible user lifecycle state before inventory',
@@ -1846,56 +1943,85 @@ final class CompanyCreatedJobSync {
       stage = CreatedJobSyncStage.channelOpen;
       await _getChannel();
       stage = CreatedJobSyncStage.startRequest;
-      final profile = _joinObject(
-        await _rpc('profile', {'profile': _syncActorProfile}),
-        {'profile'},
-      );
-      if (profile['profile'] != _syncActorProfile) {
-        throw const CompanyBootstrapRefusal(
-          'Peer does not support additional-user Jobs. Jobs remain pending.',
-        );
-      }
       final enrollment = availability.enrollment;
       final peer = availability.peer;
-      final offered = _joinObject(
-        await _rpc('policyOffer', {
-          'offer': await enrollment.createUserLifecycleOffer(peer),
+      var localUsers = (await _localUserRoster()).toSet();
+      final profile = _joinObject(
+        await _rpc('profile', {
+          'profile': _syncActorProfile,
+          'capacity': kCompanyUserCapacity,
+          'users': localUsers.toList()..sort(),
         }),
-        {'offer'},
+        {'profile', 'capacity', 'users'},
       );
-      final target = await enrollment.verifyUserLifecycleOffer(
-        Map<String, Object?>.from(offered['offer'] as Map),
-        peer,
-      );
-      final outgoingPolicy = await enrollment.prepareUserDisablePolicy(
-        peer,
-        target,
-      );
-      final policy = _joinObject(
-        await _rpc('policy', {'policy': outgoingPolicy}),
-        {'policy', 'receipt'},
-      );
-      await enrollment.acceptUserDisableReceipt(
-        policy['receipt'] == null
-            ? null
-            : Map<String, Object?>.from(policy['receipt'] as Map),
-        peer,
-      );
-      final receipt = await enrollment.acceptUserDisablePolicy(
-        policy['policy'] == null
-            ? null
-            : Map<String, Object?>.from(policy['policy'] as Map),
-        peer,
-        target,
-      );
-      await _rpc('policyAck', {'receipt': receipt});
-      if (outgoingPolicy?['more'] == true ||
-          (policy['policy'] is Map &&
-              (policy['policy'] as Map)['more'] == true)) {
+      if (profile['profile'] != _syncActorProfile ||
+          profile['capacity'] is! int ||
+          profile['capacity'] != kCompanyUserCapacity) {
         throw const CompanyBootstrapRefusal(
-          'More public user history pending. Pair again and retry Sync Now.',
+          'Peer does not support the company user collection. Jobs remain pending.',
         );
       }
+      final remoteUsers = _syncUserRoster(profile['users']);
+      final users = {...localUsers, ...remoteUsers}.toList()..sort();
+      if (users.length > kCompanyUserCapacity) {
+        throw const CompanyBootstrapRefusal(
+          'Company user roster exceeds capacity',
+        );
+      }
+      for (final userId in users) {
+        await _requireUserRoster(localUsers);
+        final offered = _joinObject(
+          await _rpc('policyOffer', {
+            'offer': await enrollment.createUserLifecycleOffer(
+              peer,
+              userId: userId,
+            ),
+          }),
+          {'offer'},
+        );
+        final target = await enrollment.verifyUserLifecycleOffer(
+          Map<String, Object?>.from(offered['offer'] as Map),
+          peer,
+        );
+        if (target.userId != userId ||
+            (remoteUsers.contains(userId) && target._checkpoint == null)) {
+          throw const CompanyBootstrapRefusal(
+            'Lifecycle reply targets another user',
+          );
+        }
+        final outgoingPolicy = await enrollment.prepareUserDisablePolicy(
+          peer,
+          target,
+        );
+        final policy = _joinObject(
+          await _rpc('policy', {'policy': outgoingPolicy}),
+          {'policy', 'receipt'},
+        );
+        await enrollment.acceptUserDisableReceipt(
+          policy['receipt'] == null
+              ? null
+              : Map<String, Object?>.from(policy['receipt'] as Map),
+          peer,
+          userId: userId,
+        );
+        final receipt = await enrollment.acceptUserDisablePolicy(
+          policy['policy'] == null
+              ? null
+              : Map<String, Object?>.from(policy['policy'] as Map),
+          peer,
+          target,
+        );
+        localUsers = await _policyUserRoster(localUsers, userId);
+        await _rpc('policyAck', {'receipt': receipt});
+        if (outgoingPolicy?['more'] == true ||
+            (policy['policy'] is Map &&
+                (policy['policy'] as Map)['more'] == true)) {
+          throw const CompanyBootstrapRefusal(
+            'More public user history pending. Pair again and retry Sync Now.',
+          );
+        }
+      }
+      await _requireUserRoster(localUsers);
       stage = CreatedJobSyncStage.localInventory;
       await _freeze(run);
       _requireRun(run);
