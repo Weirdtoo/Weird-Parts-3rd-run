@@ -204,8 +204,8 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
       ),
     );
     if (mounted) {
-      setState(() => _jobsViewEpoch++);
       await _load();
+      if (mounted) setState(() => _jobsViewEpoch++);
     }
   }
 
