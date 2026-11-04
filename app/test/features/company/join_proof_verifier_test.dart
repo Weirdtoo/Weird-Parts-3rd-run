@@ -7,6 +7,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:wired_parts/features/company/src/join_proof_verifier.dart';
 
 const certificateDomain = 'wiredpart.company.device.enroll@1:';
+const factsDomain = 'wiredpart.company.facts@2:';
+const userAuthorityDomain = 'wiredpart.company.user.authority@1:';
+const userStateDomain = 'wiredpart.company.user.state@1:';
 
 class ProbeCryptography extends DartCryptography {
   int calls = 0;
@@ -113,6 +116,82 @@ void main() {
     expect(verifier.statistics.verifications, 5);
   });
 
+  for (final domain in [userAuthorityDomain, userStateDomain, factsDomain]) {
+    test(
+      '$domain reuses only exact positives and honors custom providers',
+      () async {
+        final verifier = JoinProofVerifier();
+        const body = '{"v":1}';
+        final signature = await sign(body, domain);
+        expect(await verify(verifier, body, signature, domain: domain), isTrue);
+        expect(await verify(verifier, body, signature, domain: domain), isTrue);
+        expect(verifier.statistics.hits, 1);
+        expect(verifier.statistics.verifications, 1);
+        expect(verifier.statistics.entries, 1);
+        expect(
+          verifier.statistics.codeUnits,
+          domain.length + body.length + publicKey.length + signature.length,
+        );
+        expect(
+          await verify(verifier, '{"v":2}', signature, domain: domain),
+          isFalse,
+        );
+        expect(
+          await verify(
+            verifier,
+            body,
+            base64Encode(List.filled(64, 0)),
+            domain: domain,
+          ),
+          isFalse,
+        );
+        expect(
+          await verify(
+            verifier,
+            body,
+            signature,
+            domain: domain,
+            key: base64Encode(List.filled(32, 3)),
+          ),
+          isFalse,
+        );
+        expect(
+          await verify(
+            verifier,
+            body,
+            signature,
+            domain: domain == userAuthorityDomain
+                ? userStateDomain
+                : userAuthorityDomain,
+          ),
+          isFalse,
+        );
+        expect(verifier.statistics.hits, 1);
+        expect(verifier.statistics.verifications, 5);
+        expect(verifier.statistics.entries, 1);
+        final provider = ProbeCryptography()..refuse = true;
+        Cryptography.instance = provider;
+        expect(
+          await verify(verifier, body, signature, domain: domain),
+          isFalse,
+        );
+        provider.fail = true;
+        await expectLater(
+          verify(verifier, body, signature, domain: domain),
+          throwsStateError,
+        );
+        expect(provider.calls, 2);
+        expect(verifier.statistics.entries, 1);
+        expect(verifier.statistics.hits, 1);
+        expect(verifier.statistics.verifications, 7);
+        Cryptography.instance = pure;
+        expect(await verify(verifier, body, signature, domain: domain), isTrue);
+        expect(verifier.statistics.hits, 2);
+        expect(verifier.statistics.verifications, 7);
+      },
+    );
+  }
+
   test(
     'concurrent misses retain one completed tuple without coalescing work',
     () async {
@@ -154,38 +233,45 @@ void main() {
     expect(verifier.statistics.hits, 0);
   });
 
-  test(
-    'five persisted domains are admitted and peer or ACK proofs never are',
-    () async {
-      final verifier = JoinProofVerifier();
-      const body = '{}';
-      for (final domain in [
-        certificateDomain,
-        'wiredpart.company.join.request@1:',
-        'wiredpart.company.join.channel@1:',
-        'wiredpart.company.join.issuance@1:',
-        'wiredpart.company.join.activation@1:',
-      ]) {
-        final signature = await sign(body, domain);
-        expect(await verify(verifier, body, signature, domain: domain), isTrue);
-        expect(await verify(verifier, body, signature, domain: domain), isTrue);
-      }
-      expect(verifier.statistics.entries, 5);
-      expect(verifier.statistics.hits, 5);
-      for (final domain in [
-        'wiredpart.company.join.ack@1:',
-        'wiredpart.company.peer.init@1:',
-        'unknown:',
-      ]) {
-        final signature = await sign(body, domain);
-        expect(await verify(verifier, body, signature, domain: domain), isTrue);
-        expect(await verify(verifier, body, signature, domain: domain), isTrue);
-      }
-      expect(verifier.statistics.entries, 5);
-      expect(verifier.statistics.hits, 5);
-      expect(verifier.statistics.verifications, 11);
-    },
-  );
+  test('eight public persisted domains are admitted and private peer or ACK proofs never are', () async {
+    final verifier = JoinProofVerifier();
+    const body = '{}';
+    for (final domain in [
+      certificateDomain,
+      'wiredpart.company.join.request@1:',
+      'wiredpart.company.join.channel@1:',
+      'wiredpart.company.join.issuance@1:',
+      'wiredpart.company.join.activation@1:',
+      userAuthorityDomain,
+      userStateDomain,
+      factsDomain,
+    ]) {
+      final signature = await sign(body, domain);
+      expect(await verify(verifier, body, signature, domain: domain), isTrue);
+      expect(await verify(verifier, body, signature, domain: domain), isTrue);
+    }
+    expect(verifier.statistics.entries, 8);
+    expect(verifier.statistics.hits, 8);
+    for (final domain in [
+      'wiredpart.company.join.ack@1:',
+      'wiredpart.company.peer.initiator@1:',
+      'wiredpart.company.peer.responder@1:',
+      'wiredpart.company.peer.completion@1:',
+      'wiredpart.company.user.credential.grant@1:',
+      'wiredpart.company.user.provision.issuance@1:',
+      'wiredpart.company.user.pin.issuance@1:',
+      'wiredpart.company.user.provision.receipt@1:',
+      'wiredpart.company.user.state.receipt@1:',
+      'unknown:',
+    ]) {
+      final signature = await sign(body, domain);
+      expect(await verify(verifier, body, signature, domain: domain), isTrue);
+      expect(await verify(verifier, body, signature, domain: domain), isTrue);
+    }
+    expect(verifier.statistics.entries, 8);
+    expect(verifier.statistics.hits, 8);
+    expect(verifier.statistics.verifications, 28);
+  });
 
   test(
     'malformed proofs and failed verification never insert or hit',

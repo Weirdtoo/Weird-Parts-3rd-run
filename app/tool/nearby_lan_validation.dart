@@ -309,6 +309,9 @@ Future<Map<String, Object?>> validationReceipt(
     for (final table in db.allTables) {
       final name = table.actualTableName;
       if (name == 'app_settings' || name == 'device_profiles') continue;
+      if (schemaVersion < 14 && name == 'company_user_credential_grants') {
+        continue;
+      }
       if (schemaVersion < 12 &&
           const {'warehouse_locations', 'warehouse_counts'}.contains(name)) {
         continue;

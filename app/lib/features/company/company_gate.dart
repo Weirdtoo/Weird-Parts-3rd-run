@@ -185,9 +185,11 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
         (_status == CompanyBootstrapStatus.unjoined ||
             _status == CompanyBootstrapStatus.pendingJoin);
     if (!joining &&
-        (owner is! OwnerSession ||
+        (owner == null ||
             !owner.isValid ||
-            (!reconnect && !owner.identity.isAuthorityOwner))) {
+            (!reconnect &&
+                (owner is! OwnerSession ||
+                    !owner.identity.isAuthorityOwner)))) {
       return;
     }
     await Navigator.of(context).push(
@@ -195,6 +197,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
         builder: (_) => CompanyJoinPage(
           enrollment: _enrollment,
           approver: owner is OwnerSession ? owner : null,
+          syncSession: reconnect ? owner : null,
           reconnect: reconnect,
           createController: widget.createJoinController,
         ),
@@ -905,21 +908,18 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
           onPressed: _busy ? null : _joinNearby,
           child: const Text('Approve a nearby company device'),
         ),
-      if (session is OwnerSession)
-        OutlinedButton(
-          key: const Key('company-peer-open'),
-          onPressed: _busy ? null : () => _joinNearby(reconnect: true),
-          child: const Text('Verify a retained company peer'),
-        ),
+      OutlinedButton(
+        key: const Key('company-peer-open'),
+        onPressed: _busy ? null : () => _joinNearby(reconnect: true),
+        child: const Text('Verify a retained company peer'),
+      ),
       Text('Company ID: ${identity.companyId}'),
       Text('Shop ID: ${identity.shopId}'),
       Text('User ID: ${identity.userId}'),
       Text('Device ID: ${identity.deviceId}'),
       const SizedBox(height: 16),
       if (session is RestrictedUserSession)
-        const Text(
-          'Create Job permission only. Sign in as the owner to exchange pending Jobs with a retained peer.',
-        ),
+        const Text('Create Job permission only.'),
       if (session is OwnerSession &&
           !identity.isAuthorityOwner &&
           _userLifecycle?.disabled == true)

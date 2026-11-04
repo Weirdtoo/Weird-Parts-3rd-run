@@ -34,3 +34,12 @@ class CompanyUserDeliveries extends Table {
     bindingCommitment,
   };
 }
+
+class CompanyUserCredentialGrants extends Table {
+  TextColumn get companyId => text()();
+  TextColumn get userId => text()();
+  TextColumn get grantKey => text()();
+  TextColumn get grantBytes => text()();
+  @override
+  Set<Column> get primaryKey => {companyId, userId, grantKey};
+}

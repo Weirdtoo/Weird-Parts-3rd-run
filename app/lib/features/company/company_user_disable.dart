@@ -78,13 +78,23 @@ Future<ResolvedCompanyUserAuthority> _resolveActiveUserAuthority(
   InstallationSecurity installation,
   CompanyTrustAnchor trust,
   Map<String, int> floors,
-  String certificateBytes,
-) async {
+  String certificateBytes, {
+  bool selectedOnly = false,
+  String? expectedCommitment,
+}) async {
   final enrollment = CompanyEnrollment(installation: installation, db: db);
   final userId = _userCertificateUserId(certificateBytes);
-  final account = await enrollment._readUserAccount(userId: userId);
+  var account = await enrollment._readUserAccount(
+    userId: userId,
+    reconcile: !selectedOnly,
+  );
+  if (selectedOnly && account?.isCurrentState == true) {
+    account = await enrollment._reconcileUserPinState(account!);
+  }
   if (account == null ||
       account.certificate != certificateBytes ||
+      (expectedCommitment != null &&
+          account.identityCommitment != expectedCommitment) ||
       _securityCanonical(account.binding) !=
           _securityCanonical([
             installation.identity!.id.value,
@@ -99,7 +109,13 @@ Future<ResolvedCompanyUserAuthority> _resolveActiveUserAuthority(
   if (account.isDisabled) {
     throw const CompanyBootstrapRefusal('This company user is disabled');
   }
-  final latest = await enrollment._readUserAccount(userId: userId);
+  var latest = await enrollment._readUserAccount(
+    userId: userId,
+    reconcile: !selectedOnly,
+  );
+  if (selectedOnly && latest?.isCurrentState == true) {
+    latest = await enrollment._reconcileUserPinState(latest!);
+  }
   if (latest == null ||
       latest.isDisabled ||
       latest.identityCommitment != account.identityCommitment) {
@@ -298,7 +314,8 @@ extension CompanyUserDisable on CompanyEnrollment {
     VerifiedPeerMembership peer, {
     required String userId,
   }) async {
-    await _requireUserPeer(peer);
+    await requireCompanyJoinSchema(db);
+    await _requireUserSyncPeer(peer);
     final body = <String, Object?>{
       'v': 1,
       'kind': 'company.user.lifecycle.offer@2',
@@ -315,7 +332,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       body,
       'wiredpart.company.user.lifecycle.offer@2:',
     );
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     return signed;
   }
 
@@ -323,6 +340,7 @@ extension CompanyUserDisable on CompanyEnrollment {
     Map<String, Object?> signed,
     VerifiedPeerMembership peer,
   ) async {
+    await requireCompanyJoinSchema(db);
     final bytes = _securityCanonical(signed);
     final snapshot = _joinObject(_decodeUserJson(bytes), {'body', 'signature'});
     final body = _joinObject(snapshot['body'], {
@@ -336,7 +354,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       'binding',
       'checkpoint',
     });
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     _joinId(body, 'request');
     _joinId(body, 'user');
     final binding = body['binding'];
@@ -374,7 +392,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       member.device['key'],
       'wiredpart.company.user.lifecycle.offer@2:',
     );
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     return VerifiedUserLifecycleTarget._(bytes, peer);
   }
 
@@ -382,7 +400,8 @@ extension CompanyUserDisable on CompanyEnrollment {
     VerifiedPeerMembership peer,
     VerifiedUserLifecycleTarget target,
   ) async {
-    await _requireUserPeer(peer);
+    await requireCompanyJoinSchema(db);
+    await _requireUserSyncPeer(peer);
     if (!identical(target._peer, peer)) {
       throw const CompanyBootstrapRefusal(
         'Lifecycle target belongs to another peer',
@@ -407,7 +426,7 @@ extension CompanyUserDisable on CompanyEnrollment {
           'd': [...disable.identity, outgoing, null],
         }),
         requireCurrent: () async {
-          await _requireUserPeer(peer);
+          await _requireUserSyncPeer(peer);
         },
       );
       disable = account.disable!;
@@ -419,7 +438,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       'source': await _lifecycleLocalBinding(),
       'recipient': target._binding,
     };
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     final latest = await _readUserAccount(userId: target.userId);
     if (latest?.identityCommitment != account.identityCommitment ||
         _securityCanonical(latest?.disable?.target) !=
@@ -427,7 +446,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       throw const CompanyBootstrapRefusal('User lifecycle changed');
     }
     await _checkUserAccount(latest!, requireActive: false);
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     return body;
   }
 
@@ -454,6 +473,7 @@ extension CompanyUserDisable on CompanyEnrollment {
     VerifiedPeerMembership peer,
     VerifiedUserLifecycleTarget source,
   ) async {
+    await requireCompanyJoinSchema(db);
     if (policy == null) return null;
     if (policy['kind'] == 'company.user.state.policy@1') {
       return _acceptUserPinPolicy(policy, peer, source);
@@ -466,7 +486,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       'source',
       'recipient',
     });
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     if (!identical(source._peer, peer) ||
         body['v'] != 1 ||
         body['certificate'] is! String ||
@@ -523,7 +543,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       await _disableReceiptBody(account),
       _userDisableReceiptDomain,
     );
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     final latest = await _readUserAccount(userId: source.userId);
     if ((existing == null && latest != null) ||
         (existing != null &&
@@ -546,7 +566,7 @@ extension CompanyUserDisable on CompanyEnrollment {
     account = account.change({
       'd': [...identity, target, receipt['signature']],
     });
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     if (latest == null ||
         _securityCanonical(account.values) !=
             _securityCanonical(latest.values)) {
@@ -557,7 +577,7 @@ extension CompanyUserDisable on CompanyEnrollment {
           slot: account.slot,
         ),
         requireCurrent: () async {
-          await _requireUserPeer(peer);
+          await _requireUserSyncPeer(peer);
         },
       );
     }
@@ -569,6 +589,7 @@ extension CompanyUserDisable on CompanyEnrollment {
     VerifiedPeerMembership peer, {
     required String userId,
   }) async {
+    await requireCompanyJoinSchema(db);
     if (signed == null) return;
     if ((signed['body'] as Map?)?['kind'] == 'company.user.state.receipt@1') {
       return _acceptUserPinReceipt(signed, peer, userId: userId);
@@ -577,7 +598,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       'body',
       'signature',
     });
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     final account = await _readUserAccount(userId: userId);
     if (account == null ||
         account.isCurrentState ||
@@ -596,7 +617,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       peer._held.peer._membership.device['key'],
       _userDisableReceiptDomain,
     );
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     final latest = await _readUserAccount(userId: userId);
     if (latest?.identityCommitment != account.identityCommitment ||
         _securityCanonical(latest?.disable?.target) !=
@@ -604,7 +625,7 @@ extension CompanyUserDisable on CompanyEnrollment {
       throw const CompanyBootstrapRefusal('Disable state changed');
     }
     await _checkUserAccount(latest!, requireActive: false);
-    await _requireUserPeer(peer);
+    await _requireUserSyncPeer(peer);
     if (latest.disable!.receipt != snapshot['signature']) {
       await _writeUserAccount(
         latest.change({
@@ -615,7 +636,7 @@ extension CompanyUserDisable on CompanyEnrollment {
           ],
         }),
         requireCurrent: () async {
-          await _requireUserPeer(peer);
+          await _requireUserSyncPeer(peer);
         },
       );
     }

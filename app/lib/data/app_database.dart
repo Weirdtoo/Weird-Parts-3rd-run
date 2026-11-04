@@ -23,7 +23,7 @@ import 'tables/warehouse.dart';
 
 part 'app_database.g.dart';
 
-const kAppSchemaVersion = 13;
+const kAppSchemaVersion = 14;
 
 @DriftDatabase(
   tables: [
@@ -63,6 +63,7 @@ const kAppSchemaVersion = 13;
     CompanyJoinEvents,
     CompanyUserEvents,
     CompanyUserDeliveries,
+    CompanyUserCredentialGrants,
     WarehouseLocations,
     WarehouseCounts,
   ],
@@ -139,6 +140,9 @@ class AppDatabase extends _$AppDatabase {
         }
       }
       await transaction(() async {
+        if (from < 14) {
+          await m.createTable(companyUserCredentialGrants);
+        }
         if (from < 13) {
           await m.createTable(companyUserEvents);
           await m.createTable(companyUserDeliveries);

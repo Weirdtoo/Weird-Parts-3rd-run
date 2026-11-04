@@ -56,7 +56,9 @@ final class VerifiedPeerMembership {
     _held.channel._requireLive();
   }
 
-  Future<HeldPeerCreateContext> prepareCreateCommand(OwnerSession owner) async {
+  Future<HeldPeerCreateContext> prepareCreateCommand(
+    CompanySession owner,
+  ) async {
     await requireCurrent();
     if (!identical(owner, _held.owner)) {
       throw const CompanyBootstrapRefusal(
@@ -331,14 +333,16 @@ final class _PeerExchange {
     this.request,
     this.context,
     this.first,
+    this.permit,
   );
   final NearbyJoinChannel channel;
-  final OwnerSession owner;
+  final CompanySession owner;
   final RetainedCompanyPeer peer;
   final bool initiator;
   final String request;
   final String context;
   final String first;
+  final DeviceSyncPermit permit;
   String? response;
   String? completion;
 }
@@ -355,11 +359,17 @@ final class CompanyPeerAuthentication {
   ResolvedCompanyMembership? _localMembership;
 
   Future<List<RetainedCompanyPeer>> retainedPeers({
-    required OwnerSession session,
+    required CompanySession session,
+  }) => _retainedPeers(session, validateSelected: true);
+
+  Future<List<RetainedCompanyPeer>> _retainedPeers(
+    CompanySession session, {
+    required bool validateSelected,
   }) async {
     final installation = enrollment.installation;
     final trust = await installation.readCompanyTrust(enrollment.db);
-    if (trust == null || !identical(enrollment.currentSession, session)) {
+    if (trust == null ||
+        !identical(enrollment.currentCompanySession, session)) {
       throw const CompanyBootstrapRefusal('Company sign-in required');
     }
     session.validateAuthority(trust, installation.knownSecurityFloors);
@@ -421,19 +431,26 @@ final class CompanyPeerAuthentication {
         }
       }
     }
+    if (validateSelected) {
+      await enrollment._requireSyncSessionAccount(session);
+    }
+    if (!identical(enrollment.currentCompanySession, session)) {
+      throw const CompanyBootstrapRefusal('Company sign-in changed');
+    }
+    session.validateAuthority(trust, installation.knownSecurityFloors);
     return result;
   }
 
   Future<String> _context(
     NearbyJoinChannel channel,
-    OwnerSession owner,
+    CompanySession owner,
     RetainedCompanyPeer selected,
     bool initiator,
   ) async {
     channel._requireLive();
     final installation = enrollment.installation;
     final trust = await installation.readCompanyTrust(enrollment.db);
-    if (trust == null || !identical(enrollment.currentSession, owner)) {
+    if (trust == null || !identical(enrollment.currentCompanySession, owner)) {
       throw const CompanyBootstrapRefusal('Current company session required');
     }
     final floors = installation.knownSecurityFloors;
@@ -442,7 +459,7 @@ final class CompanyPeerAuthentication {
       db: enrollment.db,
       installation: installation,
     );
-    final peers = await retainedPeers(session: owner);
+    final peers = await _retainedPeers(owner, validateSelected: false);
     final peer = peers
         .where(
           (p) =>
@@ -479,7 +496,7 @@ final class CompanyPeerAuthentication {
     };
     // The actual directional session secrets, not a caller-provided transcript
     // string, contribute to the exporter. Guest/host order is the same at both ends.
-    final expectedRevision = installation._persisted!.revision;
+    final expectedBinding = installation._record!.binding;
     final send = await channel._send.extractBytes();
     final receive = await channel._receive.extractBytes();
     final material = channel._keys.sendDirection == 'guest'
@@ -490,9 +507,17 @@ final class CompanyPeerAuthentication {
       secretKey: SecretKey(material),
     );
     await onProofCheckpoint?.call(CompanyPeerProofCheckpoint.afterExporter);
+    await enrollment._requireSyncSessionAccount(owner);
     final current = await installation.store.readState(installation.namespace);
-    if (current?.revision != expectedRevision ||
-        !identical(enrollment.currentSession, owner)) {
+    final currentRecord = current == null
+        ? null
+        : _InstallationRecord.decode(current.bytes);
+    if (currentRecord?.binding != expectedBinding ||
+        _securityCanonical(currentRecord?.companyTrust?.encode()) !=
+            _securityCanonical(trust.encode()) ||
+        _securityCanonical(currentRecord?.floors) !=
+            _securityCanonical(floors) ||
+        !identical(enrollment.currentCompanySession, owner)) {
       throw const CompanyBootstrapRefusal(
         'Peer authority changed during proof preparation',
       );
@@ -521,6 +546,7 @@ final class CompanyPeerAuthentication {
   }
 
   Future<void> _recheck(_PeerExchange held) async {
+    held.permit.requireLive();
     final context = await _context(
       held.channel,
       held.owner,
@@ -530,6 +556,7 @@ final class CompanyPeerAuthentication {
     if (!identical(_exchange, held) || context != held.context) {
       throw const CompanyBootstrapRefusal('Retained peer context changed');
     }
+    held.permit.requireLive();
   }
 
   Future<Map<String, Object?>> _sealPeer(
@@ -570,8 +597,12 @@ final class CompanyPeerAuthentication {
   Future<Map<String, Object?>> beginPeerChallenge(
     NearbyJoinChannel channel,
     RetainedCompanyPeer selected, {
-    required OwnerSession session,
+    required CompanySession session,
   }) async {
+    final permit = await enrollment.deviceSyncPermit();
+    if (!identical(permit._session, session)) {
+      throw const CompanyBootstrapRefusal('Selected peer session changed');
+    }
     final context = await _context(channel, session, selected, true);
     _claimCompanyChannel(enrollment.installation, channel);
     final request = const Uuid().v4();
@@ -584,6 +615,7 @@ final class CompanyPeerAuthentication {
       request,
       context,
       '',
+      permit,
     );
     _exchange = held;
     final proof = await _proof(held, 'initiator', {'nonce': nonce});
@@ -595,6 +627,7 @@ final class CompanyPeerAuthentication {
       request,
       context,
       _securityCanonical(proof),
+      permit,
     );
     _exchange = next;
     return _sealPeer(next, 'peer-init', proof);
@@ -603,8 +636,12 @@ final class CompanyPeerAuthentication {
   Future<Map<String, Object?>> receivePeerChallenge(
     NearbyJoinChannel channel,
     Map<String, Object?> wire, {
-    required OwnerSession session,
+    required CompanySession session,
   }) async {
+    final permit = await enrollment.deviceSyncPermit();
+    if (!identical(permit._session, session)) {
+      throw const CompanyBootstrapRefusal('Selected peer session changed');
+    }
     final proof = await _openJoin(
       channel,
       'peer-init',
@@ -635,6 +672,7 @@ final class CompanyPeerAuthentication {
             wire['request'] as String,
             context,
             _securityCanonical(proof),
+            permit,
           ),
         );
       } on CompanyBootstrapRefusal {

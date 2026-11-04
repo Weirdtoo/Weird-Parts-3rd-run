@@ -1,31 +1,53 @@
 part of '../installation/installation_security.dart';
 
 final class CompanyJobSyncAvailability implements NearbyCompanyDisclosure {
-  CompanyJobSyncAvailability._(this.enrollment, this.owner, this.peer);
+  CompanyJobSyncAvailability._(
+    this.enrollment,
+    this.owner,
+    this.peer,
+    this._permit,
+  );
   final CompanyEnrollment enrollment;
-  final OwnerSession owner;
+  final CompanySession owner;
   final VerifiedPeerMembership peer;
+  final DeviceSyncPermit _permit;
   bool _open = true;
 
   static Future<CompanyJobSyncAvailability> open({
     required CompanyEnrollment enrollment,
-    required OwnerSession owner,
+    required CompanySession owner,
     required VerifiedPeerMembership peer,
   }) async {
-    final result = CompanyJobSyncAvailability._(enrollment, owner, peer);
+    final permit = await enrollment.deviceSyncPermit();
+    if (!identical(permit._session, owner)) {
+      throw const CompanyBootstrapRefusal('Selected sync session changed');
+    }
+    final result = CompanyJobSyncAvailability._(
+      enrollment,
+      owner,
+      peer,
+      permit,
+    );
     await result.requireCurrent();
     return result;
   }
 
   void close() => _open = false;
+  Future<T> run<T>(Future<T> Function() operation) => _permit.run(() async {
+    await requireCurrent();
+    final result = await operation();
+    await requireCurrent();
+    return result;
+  });
   @override
   void requireLive() {
     if (!_open ||
-        !identical(enrollment.currentSession, owner) ||
+        !identical(enrollment.currentCompanySession, owner) ||
         !identical(peer._held.owner, owner) ||
         !identical(peer._owner.enrollment, enrollment)) {
       throw const CompanyBootstrapRefusal('Manual Job sync is unavailable');
     }
+    _permit.requireLive();
     if (!identical(peer._owner._exchange, peer._held)) {
       throw const CompanyBootstrapRefusal('Retained peer context changed');
     }
@@ -646,7 +668,9 @@ final class CompanyCreatedJobSync {
   final Set<String> _lifecycleFinished = {};
 
   Future<List<String>> _localUserRoster() async {
-    final accounts = await availability.enrollment._readUserAccounts();
+    final accounts = await availability.enrollment._readUserAccounts(
+      reconcile: false,
+    );
     return accounts.byUserId.keys.toList()..sort();
   }
 
@@ -1027,11 +1051,21 @@ final class CompanyCreatedJobSync {
 
   Future<void> _freeze(_CreatedJobRun run) async {
     final records = <Object>[
-      ...await _commands.syncHoldings(ownerSession: availability.owner),
-      ...await _commands.nameSyncHoldings(ownerSession: availability.owner),
-      ...await _commands.detailsSyncHoldings(ownerSession: availability.owner),
+      ...await _commands.syncHoldings(
+        ownerSession: availability.owner,
+        availability: availability,
+      ),
+      ...await _commands.nameSyncHoldings(
+        ownerSession: availability.owner,
+        availability: availability,
+      ),
+      ...await _commands.detailsSyncHoldings(
+        ownerSession: availability.owner,
+        availability: availability,
+      ),
       ...await _commands.lifecycleSyncHoldings(
         ownerSession: availability.owner,
+        availability: availability,
       ),
     ];
     _requireRun(run);
@@ -1124,20 +1158,24 @@ final class CompanyCreatedJobSync {
       null => await _commands.verifySyncRecord(
         descriptor['job'] as String,
         availability.owner,
+        availability: availability,
       ),
       'job.name.set@1' ||
       'job.name.set@2' => await _commands.verifyNameSyncRecord(
         descriptor['operation'] as String,
         availability.owner,
+        availability: availability,
       ),
       'job.details.patch@1' ||
       'job.details.patch@2' => await _commands.verifyDetailsSyncRecord(
         descriptor['operation'] as String,
         availability.owner,
+        availability: availability,
       ),
       'job.lifecycle.set@1' => await _commands.verifyLifecycleSyncRecord(
         descriptor['operation'] as String,
         availability.owner,
+        availability: availability,
       ),
       _ => throw const CompanyBootstrapRefusal(
         'Unsupported Job operation family',
@@ -1258,10 +1296,13 @@ final class CompanyCreatedJobSync {
     final row = await _record(descriptor);
     final body = ((jsonDecode(row.operationBytes) as Map)['body']) as Map;
     final user = body['user'] as String;
-    if (user == availability.owner.identity.userId) return false;
     final proof =
         (jsonDecode(row.operationBytes) as Map)['authorization'] as Map;
     final assertion = proof['body'] as Map;
+    final legacyOwner = availability.peer._owner._localMembership?.user['id'];
+    if ((assertion['v'] == 2 || assertion['v'] == 3) && user == legacyOwner) {
+      return false;
+    }
     return availability.enrollment.isCompanyUserOperationHeld(
       user,
       assertion['credential'] as int,
@@ -1294,11 +1335,21 @@ final class CompanyCreatedJobSync {
     _requireRun(run);
     _requireInventories();
     final records = <Object>[
-      ...await _commands.syncHoldings(ownerSession: availability.owner),
-      ...await _commands.nameSyncHoldings(ownerSession: availability.owner),
-      ...await _commands.detailsSyncHoldings(ownerSession: availability.owner),
+      ...await _commands.syncHoldings(
+        ownerSession: availability.owner,
+        availability: availability,
+      ),
+      ...await _commands.nameSyncHoldings(
+        ownerSession: availability.owner,
+        availability: availability,
+      ),
+      ...await _commands.detailsSyncHoldings(
+        ownerSession: availability.owner,
+        availability: availability,
+      ),
       ...await _commands.lifecycleSyncHoldings(
         ownerSession: availability.owner,
+        availability: availability,
       ),
     ];
     _requireRun(run);
@@ -1631,7 +1682,7 @@ final class CompanyCreatedJobSync {
   Future<IncomingCreateJobOutcome> _apply(
     Map<String, Object?> descriptor,
     Uint8List bytes, {
-    required OwnerSession ownerSession,
+    required CompanySession ownerSession,
     required CompanyJobSyncAvailability availability,
   }) async {
     final body = (jsonDecode(utf8.decode(bytes)) as Map)['body'] as Map;

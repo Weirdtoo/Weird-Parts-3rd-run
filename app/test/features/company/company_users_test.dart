@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:uuid/uuid.dart';
 import 'package:cryptography/cryptography.dart';
+import 'package:cryptography/dart.dart';
 import 'package:crypto/crypto.dart' as hashes;
 import 'package:wired_parts/features/company/company_bootstrap.dart';
 import 'package:wired_parts/features/installation/installation_security.dart';
@@ -22,6 +23,41 @@ import 'company_join_test.dart'
 import 'company_created_job_sync_test.dart' show syncAttackWire;
 import '../job_line_commands/atomic_job_line_support.dart' show AtomicFixture;
 
+class _HoldCredentialSignature extends DartCryptography {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Ed25519 ed25519() => _HeldCredentialEd25519(this);
+}
+
+class _HeldCredentialEd25519 extends DartEd25519 {
+  _HeldCredentialEd25519(this.owner);
+  final _HoldCredentialSignature owner;
+  @override
+  Future<Signature> sign(
+    List<int> message, {
+    required KeyPair keyPair,
+    PublicKey? publicKey,
+  }) async {
+    final signature = await super.sign(
+      message,
+      keyPair: keyPair,
+      publicKey: publicKey,
+    );
+    final prefix = utf8.encode('wiredpart.company.user.pin.issuance@1:');
+    if (message.length >= prefix.length &&
+        List.generate(
+          prefix.length,
+          (i) => message[i] == prefix[i],
+        ).every((v) => v) &&
+        !owner.entered.isCompleted) {
+      owner.entered.complete();
+      await owner.release.future;
+    }
+    return signature;
+  }
+}
+
 Future<
   ({
     VerifiedPeerMembership a,
@@ -30,10 +66,18 @@ Future<
     NearbyController bc,
   })
 >
-_peers(JoinFixture f, {CompanyEnrollment? enrollmentA}) async {
+_peers(
+  JoinFixture f, {
+  CompanyEnrollment? enrollmentA,
+  CompanySession? sessionA,
+  CompanySession? sessionB,
+}) async {
   final aEnrollment = enrollmentA ?? f.aEnrollment;
   final ownerB =
-      f.bEnrollment.currentSession ?? await f.bEnrollment.signIn('1234');
+      sessionB ??
+      f.bEnrollment.currentSession ??
+      await f.bEnrollment.signIn('1234');
+  final selectedA = sessionA ?? aEnrollment.currentSession!;
   late NearbyController aController, bController;
   final (bc, ac) = await joinChannels(
     onPaired: (b, a) {
@@ -45,8 +89,8 @@ _peers(JoinFixture f, {CompanyEnrollment? enrollmentA}) async {
   final ba = CompanyPeerAuthentication(enrollment: f.bEnrollment);
   final challenge = await aa.beginPeerChallenge(
     ac,
-    (await aa.retainedPeers(session: aEnrollment.currentSession!)).single,
-    session: aEnrollment.currentSession!,
+    (await aa.retainedPeers(session: selectedA)).single,
+    session: selectedA,
   );
   final response = await ba.receivePeerChallenge(
     bc,
@@ -201,6 +245,16 @@ void main() {
         peer: peer.a,
         userId: user.userId,
       );
+    }
+    final grants = await f.aDb
+        .customSelect('SELECT grant_bytes FROM company_user_credential_grants')
+        .get();
+    expect(grants, hasLength(2));
+    for (final row in grants) {
+      final grant = jsonDecode(row.read<String>('grant_bytes')) as Map;
+      expect((grant['body'] as Map)['purpose'], 'existing-credential-updates');
+      expect((grant['body'] as Map).keys, isNot(contains('p')));
+      expect((grant['body'] as Map).keys, isNot(contains('rootSeed')));
     }
     expect(
       (await f.bEnrollment.listCompanyUsers())
@@ -611,6 +665,112 @@ void main() {
     expect(f.aEnrollment.currentCompanySession, isNull);
     expect(f.aEnrollment.currentSession, isNull);
   });
+  test('device sync permit follows the selected account', () async {
+    final f = await JoinFixture.create();
+    final user = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Sam Builder',
+      pin: '0123',
+    );
+    final selected = await f.aEnrollment.signInUser(user.userId, '0123');
+    final permit = await f.aEnrollment.deviceSyncPermit();
+    expect(permit.identity.userId, selected.identity.userId);
+    expect(f.aEnrollment.currentSession, isNull);
+    expect(await permit.run(() async => 'selected'), 'selected');
+    await f.aEnrollment.signIn('1234');
+    expect(permit.requireLive, throwsA(isA<CompanyBootstrapRefusal>()));
+    await expectLater(
+      permit.requireCurrent(),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+  });
+  test(
+    'device sync permit refuses a changed protected store generation',
+    () async {
+      final f = await JoinFixture.create();
+      final user = await f.aEnrollment.createRestrictedUser(
+        owner: f.owner,
+        requestId: const Uuid().v4(),
+        name: 'Sam Builder',
+        pin: '0123',
+      );
+      await f.aEnrollment.signInUser(user.userId, '0123');
+      final permit = await f.aEnrollment.deviceSyncPermit();
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      f.aStore.beforeRead = (namespace) {
+        if (namespace == f.a.namespace && !entered.isCompleted) {
+          entered.complete();
+          return release.future;
+        }
+        return null;
+      };
+      final checking = permit.requireCurrent();
+      await entered.future.timeout(const Duration(seconds: 10));
+      f.aStore.beforeRead = null;
+      final previous = f.aStore.states[f.a.namespace]!;
+      final changed =
+          jsonDecode(utf8.decode(previous.bytes)) as Map<String, dynamic>;
+      changed['store'] = const Uuid().v4();
+      await f.aStore.compareAndSwapState(
+        f.a.namespace,
+        expectedRevision: previous.revision,
+        nextRevision: const Uuid().v4(),
+        bytes: Uint8List.fromList(utf8.encode(jsonEncode(changed))),
+      );
+      release.complete();
+      await expectLater(checking, throwsA(anything));
+    },
+  );
+  for (final operation in ['reset', 'disable']) {
+    test(
+      'device sync permit refuses selected user $operation during protected read',
+      () async {
+        final f = await JoinFixture.create();
+        final user = await f.aEnrollment.createRestrictedUser(
+          owner: f.owner,
+          requestId: const Uuid().v4(),
+          name: 'Sam Builder',
+          pin: '0123',
+        );
+        await f.aEnrollment.signInUser(user.userId, '0123');
+        final permit = await f.aEnrollment.deviceSyncPermit();
+        final administrator = CompanyEnrollment(installation: f.a, db: f.aDb);
+        final owner = await administrator.signIn('1234');
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        f.aStore.beforeRead = (namespace) {
+          if (namespace == companyUserNamespace(f.a.namespace) &&
+              !entered.isCompleted) {
+            entered.complete();
+            return release.future;
+          }
+          return null;
+        };
+        final checking = permit.requireCurrent();
+        await entered.future.timeout(const Duration(seconds: 10));
+        f.aStore.beforeRead = null;
+        if (operation == 'reset') {
+          await administrator.resetRestrictedUserPin(
+            owner: owner,
+            userId: user.userId,
+            requestId: const Uuid().v4(),
+            expectedCredentialVersion: 1,
+            pin: '4567',
+          );
+        } else {
+          await administrator.disableRestrictedUser(
+            owner: owner,
+            userId: user.userId,
+            requestId: const Uuid().v4(),
+          );
+        }
+        release.complete();
+        await expectLater(checking, throwsA(anything));
+      },
+    );
+  }
   test(
     'a supplied restricted session cannot validate a legacy v1 Job-line proof',
     () async {
@@ -999,6 +1159,911 @@ void main() {
       },
     );
   }
+  test('selected user verifies another current author original Job', () async {
+    final f = await JoinFixture.create(allowOwnerAdditions: true);
+    final first = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'First',
+      pin: '0123',
+    );
+    final second = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Second',
+      pin: '4567',
+    );
+    await f.aEnrollment.resetRestrictedUserPin(
+      owner: f.owner,
+      userId: second.userId,
+      requestId: const Uuid().v4(),
+      expectedCredentialVersion: 1,
+      pin: '6789',
+    );
+    final author = await f.aEnrollment.signInUser(second.userId, '6789');
+    final command = CreateJob(
+      companyId: author.identity.companyId,
+      shopId: author.identity.shopId,
+      jobId: const Uuid().v4(),
+      requestId: const Uuid().v4(),
+      name: 'Other author',
+    );
+    final commands = CompanyJobCommands(enrollment: f.aEnrollment);
+    await commands.createJob(command, ownerSession: author);
+    final selected = await f.aEnrollment.signInUser(first.userId, '0123');
+    final verified = await commands.verifySyncRecord(command.jobId, selected);
+    expect(
+      (jsonDecode(verified.operationBytes)['body'] as Map)['user'],
+      second.userId,
+    );
+    expect(f.aEnrollment.currentCompanySession, same(selected));
+  });
+
+  test(
+    'selected new epoch holds its own old pending Job without acknowledgment',
+    () async {
+      final f = await JoinFixture.create(allowOwnerAdditions: true);
+      await activateFixtureB(f);
+      final user = await f.aEnrollment.createRestrictedUser(
+        owner: f.owner,
+        requestId: const Uuid().v4(),
+        name: 'Selected',
+        pin: '0123',
+      );
+      final initial = await _peers(f);
+      final request = await f.bEnrollment.prepareUserProvisionRequest(
+        peer: initial.b,
+        requestId: const Uuid().v4(),
+        userId: user.userId,
+      );
+      final bundle = await f.aEnrollment.prepareUserProvision(
+        owner: f.owner,
+        peer: initial.a,
+        request: await f.aEnrollment.receiveUserProvisionRequest(
+          request,
+          peer: initial.a,
+        ),
+      );
+      final receipt = await f.bEnrollment.acceptUserProvision(
+        bundle,
+        peer: initial.b,
+      );
+      await f.aEnrollment.acceptUserProvisionReceipt(
+        receipt,
+        peer: initial.a,
+        userId: user.userId,
+      );
+      await initial.ac.dispose();
+      await initial.bc.dispose();
+      final oldSession = await f.aEnrollment.signInUser(user.userId, '0123');
+      final oldJob = CreateJob(
+        companyId: oldSession.identity.companyId,
+        shopId: oldSession.identity.shopId,
+        jobId: const Uuid().v4(),
+        requestId: const Uuid().v4(),
+        name: 'Old epoch pending',
+      );
+      await CompanyJobCommands(enrollment: f.aEnrollment)
+          .createJob(oldJob, ownerSession: oldSession);
+      final owner = await f.aEnrollment.signIn('1234');
+      await f.aEnrollment.resetRestrictedUserPin(
+        owner: owner,
+        userId: user.userId,
+        requestId: const Uuid().v4(),
+        expectedCredentialVersion: 1,
+        pin: '4567',
+      );
+      final delivery = await _peers(f);
+      final target = await f.aEnrollment.verifyUserLifecycleOffer(
+        await f.bEnrollment.createUserLifecycleOffer(
+          delivery.b,
+          userId: user.userId,
+        ),
+        delivery.a,
+      );
+      final source = await f.bEnrollment.verifyUserLifecycleOffer(
+        await f.aEnrollment.createUserLifecycleOffer(
+          delivery.a,
+          userId: user.userId,
+        ),
+        delivery.b,
+      );
+      final policy = await f.aEnrollment.prepareUserDisablePolicy(
+        delivery.a,
+        target,
+      );
+      final delivered = await f.bEnrollment.acceptUserDisablePolicy(
+        policy,
+        delivery.b,
+        source,
+      );
+      await f.aEnrollment.acceptUserDisableReceipt(
+        delivered,
+        delivery.a,
+        userId: user.userId,
+      );
+      await delivery.ac.dispose();
+      await delivery.bc.dispose();
+      final aSession = await f.aEnrollment.signInUser(user.userId, '4567');
+      final bSession = await f.bEnrollment.signInUser(user.userId, '4567');
+      final peers = await _peers(f, sessionA: aSession, sessionB: bSession);
+      final a = CompanyCreatedJobSync(
+        availability: await CompanyJobSyncAvailability.open(
+          enrollment: f.aEnrollment,
+          owner: aSession,
+          peer: peers.a,
+        ),
+        controller: peers.ac,
+      );
+      final b = CompanyCreatedJobSync(
+        availability: await CompanyJobSyncAvailability.open(
+          enrollment: f.bEnrollment,
+          owner: bSession,
+          peer: peers.b,
+        ),
+        controller: peers.bc,
+      );
+      peers.ac.onJoinMessage = (_, wire) => a.receive(wire);
+      peers.bc.onJoinMessage = (_, wire) => b.receive(wire);
+      final result = await a.syncNow();
+      expect(result.complete, isFalse);
+      expect(result.held, greaterThanOrEqualTo(1));
+      expect(
+        (await f.aDb.select(f.aDb.companyJobs).get()).where(
+          (row) => row.jobId == oldJob.jobId,
+        ),
+        hasLength(1),
+      );
+      expect(
+        (await f.bDb.select(f.bDb.companyJobs).get()).where(
+          (row) => row.jobId == oldJob.jobId,
+        ),
+        isEmpty,
+      );
+      for (final db in [f.aDb, f.bDb]) {
+        expect(
+          await (db.select(
+            db.companyJobPeerAcks,
+          )..where((row) => row.requestId.equals(oldJob.requestId))).get(),
+          isEmpty,
+        );
+      }
+      expect(f.aEnrollment.currentCompanySession, same(aSession));
+      expect(f.bEnrollment.currentCompanySession, same(bSession));
+      await a.closeAndDrain();
+      await b.closeAndDrain();
+      await peers.ac.dispose();
+      await peers.bc.dispose();
+    },
+    timeout: const Timeout(Duration(minutes: 7)),
+  );
+
+  test('selected restricted users synchronize existing credentials and both authors jobs', () async {
+    final stopwatch = Stopwatch()..start();
+    final f = await JoinFixture.create(allowOwnerAdditions: true);
+    await activateFixtureB(f);
+    final first = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'First',
+      pin: '0123',
+    );
+    final second = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Second',
+      pin: '4567',
+    );
+    final initial = await _peers(f);
+    for (final user in [first, second]) {
+      final request = await f.bEnrollment.prepareUserProvisionRequest(
+        peer: initial.b,
+        requestId: const Uuid().v4(),
+        userId: user.userId,
+      );
+      final bundle = await f.aEnrollment.prepareUserProvision(
+        owner: f.aEnrollment.currentSession!,
+        peer: initial.a,
+        request: await f.aEnrollment.receiveUserProvisionRequest(
+          request,
+          peer: initial.a,
+        ),
+      );
+      final ack = await f.bEnrollment.acceptUserProvision(
+        bundle,
+        peer: initial.b,
+      );
+      await f.aEnrollment.acceptUserProvisionReceipt(
+        ack,
+        peer: initial.a,
+        userId: user.userId,
+      );
+    }
+    await initial.ac.dispose();
+    await initial.bc.dispose();
+    await f.aEnrollment.resetRestrictedUserPin(
+      owner: f.aEnrollment.currentSession!,
+      userId: second.userId,
+      requestId: const Uuid().v4(),
+      expectedCredentialVersion: 1,
+      pin: '6789',
+    );
+    final secondSession = await f.aEnrollment.signInUser(second.userId, '6789');
+    final secondJob = CreateJob(
+      companyId: secondSession.identity.companyId,
+      shopId: secondSession.identity.shopId,
+      jobId: const Uuid().v4(),
+      requestId: const Uuid().v4(),
+      name: 'Second author',
+    );
+    await CompanyJobCommands(enrollment: f.aEnrollment)
+        .createJob(secondJob, ownerSession: secondSession);
+    final selectedB = await f.bEnrollment.signInUser(first.userId, '0123');
+    final firstJob = CreateJob(
+      companyId: selectedB.identity.companyId,
+      shopId: selectedB.identity.shopId,
+      jobId: const Uuid().v4(),
+      requestId: const Uuid().v4(),
+      name: 'First author',
+    );
+    await CompanyJobCommands(enrollment: f.bEnrollment)
+        .createJob(firstJob, ownerSession: selectedB);
+    final selectedA = await f.aEnrollment.signInUser(first.userId, '0123');
+    final freshPairStart = stopwatch.elapsed;
+    final peers = await _peers(f, sessionA: selectedA, sessionB: selectedB);
+    final a = CompanyCreatedJobSync(
+      availability: await CompanyJobSyncAvailability.open(
+        enrollment: f.aEnrollment,
+        owner: selectedA,
+        peer: peers.a,
+      ),
+      controller: peers.ac,
+    );
+    final b = CompanyCreatedJobSync(
+      availability: await CompanyJobSyncAvailability.open(
+        enrollment: f.bEnrollment,
+        owner: selectedB,
+        peer: peers.b,
+      ),
+      controller: peers.bc,
+    );
+    peers.ac.onJoinMessage = (_, wire) => a.receive(wire);
+    peers.bc.onJoinMessage = (_, wire) => b.receive(wire);
+    final result = await a.syncNow();
+    expect(
+      result.complete,
+      isTrue,
+      reason:
+          '${result.message}; sender ${a.lastFailure}; receiver ${b.lastFailure}',
+    );
+    expect(f.aEnrollment.currentCompanySession, same(selectedA));
+    expect(f.bEnrollment.currentCompanySession, same(selectedB));
+    expect(f.aEnrollment.currentSession, isNull);
+    expect(f.bEnrollment.currentSession, isNull);
+    for (final db in [f.aDb, f.bDb]) {
+      final rows = await db.select(db.companyJobs).get();
+      expect(rows.where((r) => r.jobId == firstJob.jobId), hasLength(1));
+      expect(rows.where((r) => r.jobId == secondJob.jobId), hasLength(1));
+      expect(
+        (jsonDecode(
+              rows.singleWhere((r) => r.jobId == firstJob.jobId).operationBytes,
+            )['body']
+            as Map)['user'],
+        first.userId,
+      );
+      expect(
+        (jsonDecode(
+              rows
+                  .singleWhere((r) => r.jobId == secondJob.jobId)
+                  .operationBytes,
+            )['body']
+            as Map)['user'],
+        second.userId,
+      );
+    }
+    final repeat = await a.syncNow();
+    expect(repeat.complete, isTrue);
+    expect(repeat.sent, 0);
+    expect(repeat.received, 0);
+    expect(
+      stopwatch.elapsed - freshPairStart,
+      lessThan(const Duration(minutes: 5)),
+    );
+    expect(
+      peers.ac.pairedJoinSession!.timeUntilExpiry,
+      greaterThan(Duration.zero),
+    );
+    await a.closeAndDrain();
+    await b.closeAndDrain();
+    await peers.ac.dispose();
+    await peers.bc.dispose();
+    await expectLater(
+      f.bEnrollment.signInUser(second.userId, '4567'),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    final resetUser = await f.bEnrollment.signInUser(second.userId, '6789');
+    expect(resetUser.identity.userId, second.userId);
+  }, timeout: const Timeout(Duration(minutes: 7)));
+
+  test(
+    'restricted policy delivers an owner authorized existing credential',
+    () async {
+      final f = await JoinFixture.create(allowOwnerAdditions: true);
+      await activateFixtureB(f);
+      final selected = await f.aEnrollment.createRestrictedUser(
+        owner: f.owner,
+        requestId: const Uuid().v4(),
+        name: 'Selected',
+        pin: '0123',
+      );
+      final other = await f.aEnrollment.createRestrictedUser(
+        owner: f.owner,
+        requestId: const Uuid().v4(),
+        name: 'Other',
+        pin: '4567',
+      );
+      final initial = await _peers(f);
+      for (final user in [selected, other]) {
+        final request = await f.bEnrollment.prepareUserProvisionRequest(
+          peer: initial.b,
+          requestId: const Uuid().v4(),
+          userId: user.userId,
+        );
+        final bundle = await f.aEnrollment.prepareUserProvision(
+          owner: f.aEnrollment.currentSession!,
+          peer: initial.a,
+          request: await f.aEnrollment.receiveUserProvisionRequest(
+            request,
+            peer: initial.a,
+          ),
+        );
+        final ack = await f.bEnrollment.acceptUserProvision(
+          bundle,
+          peer: initial.b,
+        );
+        await f.aEnrollment.acceptUserProvisionReceipt(
+          ack,
+          peer: initial.a,
+          userId: user.userId,
+        );
+      }
+      await initial.ac.dispose();
+      await initial.bc.dispose();
+      await f.aEnrollment.resetRestrictedUserPin(
+        owner: f.aEnrollment.currentSession!,
+        userId: other.userId,
+        requestId: const Uuid().v4(),
+        expectedCredentialVersion: 1,
+        pin: '6789',
+      );
+      final author = await f.aEnrollment.signInUser(other.userId, '6789');
+      final command = CreateJob(
+        companyId: author.identity.companyId,
+        shopId: author.identity.shopId,
+        jobId: const Uuid().v4(),
+        requestId: const Uuid().v4(),
+        name: 'Other author',
+      );
+      final commands = CompanyJobCommands(enrollment: f.aEnrollment);
+      await commands.createJob(command, ownerSession: author);
+      final aSession = await f.aEnrollment.signInUser(selected.userId, '0123');
+      final bSession = await f.bEnrollment.signInUser(selected.userId, '0123');
+      final peers = await _peers(f, sessionA: aSession, sessionB: bSession);
+      final target = await f.aEnrollment.verifyUserLifecycleOffer(
+        await f.bEnrollment.createUserLifecycleOffer(
+          peers.b,
+          userId: other.userId,
+        ),
+        peers.a,
+      );
+      final source = await f.bEnrollment.verifyUserLifecycleOffer(
+        await f.aEnrollment.createUserLifecycleOffer(
+          peers.a,
+          userId: other.userId,
+        ),
+        peers.b,
+      );
+      final grant =
+          (await f.aDb.select(f.aDb.companyUserCredentialGrants).get())
+              .singleWhere((row) => row.userId == other.userId);
+      await f.aDb.customStatement(
+        'DELETE FROM company_user_credential_grants WHERE company_id = ? AND user_id = ? AND grant_key = ?',
+        [grant.companyId, grant.userId, grant.grantKey],
+      );
+      final deletedSql = await sqlSnapshot(f.aDb);
+      final deletedProtected = Map.of(f.aStore.states);
+      await expectLater(
+        f.aEnrollment.prepareUserDisablePolicy(peers.a, target),
+        throwsA(isA<CompanyBootstrapRefusal>()),
+      );
+      expect(await sqlSnapshot(f.aDb), deletedSql);
+      expectJoinProtectedUnchanged(f.aStore, deletedProtected);
+      await f.aDb.customStatement(
+        'INSERT INTO company_user_credential_grants (company_id, user_id, grant_key, grant_bytes) VALUES (?, ?, ?, ?)',
+        [grant.companyId, grant.userId, grant.grantKey, grant.grantBytes],
+      );
+      final originalGrant =
+          jsonDecode(grant.grantBytes) as Map<String, dynamic>;
+      for (final field in [
+        'signature',
+        'creation',
+        'source',
+        'recipient',
+        'purpose',
+      ]) {
+        final altered = jsonDecode(grant.grantBytes) as Map<String, dynamic>;
+        if (field == 'signature') {
+          altered['signature'] = base64Encode(List.filled(64, 0));
+        } else {
+          (altered['body'] as Map<String, dynamic>)[field] =
+              field == 'source' || field == 'recipient' ? [] : 'altered';
+        }
+        await f.aDb.customStatement(
+          'UPDATE company_user_credential_grants SET grant_bytes = ? WHERE company_id = ? AND user_id = ? AND grant_key = ?',
+          [_canonical(altered), grant.companyId, grant.userId, grant.grantKey],
+        );
+        final before = await sqlSnapshot(f.aDb);
+        final protected = Map.of(f.aStore.states);
+        await expectLater(
+          f.aEnrollment.prepareUserDisablePolicy(peers.a, target),
+          throwsA(isA<CompanyBootstrapRefusal>()),
+        );
+        expect(await sqlSnapshot(f.aDb), before);
+        expectJoinProtectedUnchanged(f.aStore, protected);
+      }
+      await f.aDb.customStatement(
+        'UPDATE company_user_credential_grants SET grant_bytes = ? WHERE company_id = ? AND user_id = ? AND grant_key = ?',
+        [
+          _canonical(originalGrant),
+          grant.companyId,
+          grant.userId,
+          grant.grantKey,
+        ],
+      );
+      final policy = await f.aEnrollment.prepareUserDisablePolicy(
+        peers.a,
+        target,
+      );
+      final receipt = await f.bEnrollment.acceptUserDisablePolicy(
+        policy,
+        peers.b,
+        source,
+      );
+      expect(receipt, isNotNull);
+      final reversePolicy = await f.bEnrollment.prepareUserDisablePolicy(
+        peers.b,
+        source,
+      );
+      await f.aEnrollment.acceptUserDisableReceipt(
+        receipt,
+        peers.a,
+        userId: other.userId,
+      );
+      final reverseReceipt = await f.aEnrollment.acceptUserDisablePolicy(
+        reversePolicy,
+        peers.a,
+        target,
+      );
+      await f.bEnrollment.acceptUserDisableReceipt(
+        reverseReceipt,
+        peers.b,
+        userId: other.userId,
+      );
+      final availability = await CompanyJobSyncAvailability.open(
+        enrollment: f.aEnrollment,
+        owner: aSession,
+        peer: peers.a,
+      );
+      expect(
+        await f.aEnrollment.isCompanyUserOperationHeld(other.userId, 2),
+        isFalse,
+      );
+      final saved = await commands.verifySyncRecord(
+        command.jobId,
+        aSession,
+        availability: availability,
+      );
+      expect(
+        (jsonDecode(saved.operationBytes)['body'] as Map)['user'],
+        other.userId,
+      );
+      expect(f.aEnrollment.currentCompanySession, same(aSession));
+      expect(f.bEnrollment.currentCompanySession, same(bSession));
+      await peers.ac.dispose();
+      await peers.bc.dispose();
+      await expectLater(
+        f.bEnrollment.signInUser(other.userId, '4567'),
+        throwsA(isA<CompanyBootstrapRefusal>()),
+      );
+      expect(
+        (await f.bEnrollment.signInUser(other.userId, '6789')).identity.userId,
+        other.userId,
+      );
+    },
+    timeout: const Timeout(Duration(minutes: 7)),
+  );
+
+  test('restricted receiver accepts original owner name details and lifecycle operations', () async {
+    final f = await JoinFixture.create(allowOwnerAdditions: true);
+    await activateFixtureB(f);
+    final user = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Receiver',
+      pin: '0123',
+    );
+    final initial = await _peers(f);
+    final request = await f.bEnrollment.prepareUserProvisionRequest(
+      peer: initial.b,
+      requestId: const Uuid().v4(),
+      userId: user.userId,
+    );
+    final bundle = await f.aEnrollment.prepareUserProvision(
+      owner: f.owner,
+      peer: initial.a,
+      request: await f.aEnrollment.receiveUserProvisionRequest(
+        request,
+        peer: initial.a,
+      ),
+    );
+    final ack = await f.bEnrollment.acceptUserProvision(
+      bundle,
+      peer: initial.b,
+    );
+    await f.aEnrollment.acceptUserProvisionReceipt(
+      ack,
+      peer: initial.a,
+      userId: user.userId,
+    );
+    await initial.ac.dispose();
+    await initial.bc.dispose();
+    final author = CompanyJobCommands(enrollment: f.aEnrollment);
+    var view = (await author.listJobViews(ownerSession: f.owner)).single;
+    final rename = RenameJob(
+      companyId: f.owner.identity.companyId,
+      shopId: f.owner.identity.shopId,
+      jobId: view.baseJob.id,
+      requestId: const Uuid().v4(),
+      creationDigest: view.creationDigest,
+      observedHeads: [],
+      name: 'Owner name',
+      observedLifecycleHeads: view.lifecycle.lifecycleHeads,
+    );
+    await author.renameJob(rename, ownerSession: f.owner);
+    view = (await author.listJobViews(ownerSession: f.owner)).single;
+    final details = PatchJobDetails(
+      companyId: f.owner.identity.companyId,
+      shopId: f.owner.identity.shopId,
+      jobId: view.baseJob.id,
+      requestId: const Uuid().v4(),
+      creationDigest: view.creationDigest,
+      patch: const JobDetailsPatch(notes: SetField('Owner details')),
+      observedHeads: {JobDetailField.notes: []},
+      observedLifecycleHeads: view.lifecycle.lifecycleHeads,
+    );
+    await author.patchJobDetails(details, ownerSession: f.owner);
+    view = (await author.listJobViews(ownerSession: f.owner)).single;
+    final lifecycle = SetJobLifecycle(
+      companyId: f.owner.identity.companyId,
+      shopId: f.owner.identity.shopId,
+      jobId: view.baseJob.id,
+      requestId: const Uuid().v4(),
+      creationDigest: view.creationDigest,
+      observed: view.lifecycle.context,
+      choice: JobLifecycleChoice.deleted,
+    );
+    await author.setJobLifecycle(lifecycle, ownerSession: f.owner);
+    final selected = await f.bEnrollment.signInUser(user.userId, '0123');
+    final before = await sqlSnapshot(f.bDb);
+    await expectLater(
+      f.bEnrollment.issueRenameJobAssertion(rename),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    await expectLater(
+      f.bEnrollment.issueJobDetailsAssertion(details),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    await expectLater(
+      f.bEnrollment.issueJobLifecycleAssertion(lifecycle),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    expect(await sqlSnapshot(f.bDb), before);
+    final peers = await _peers(f, sessionB: selected);
+    final availability = await CompanyJobSyncAvailability.open(
+      enrollment: f.bEnrollment,
+      owner: selected,
+      peer: peers.b,
+    );
+    final receiver = CompanyJobCommands(enrollment: f.bEnrollment);
+    final creation =
+        (await f.aDb.select(f.aDb.companyJobs).get()).single.operationBytes;
+    final name =
+        (await f.aDb.select(f.aDb.companyJobNames).get()).single.operationBytes;
+    final detail = (await f.aDb.select(f.aDb.companyJobDetails).get())
+        .single
+        .operationBytes;
+    final state = (await f.aDb.select(f.aDb.companyJobLifecycles).get())
+        .single
+        .operationBytes;
+    Uint8List bytes(String value) => Uint8List.fromList(utf8.encode(value));
+    await receiver.applyIncomingCreate(
+      bytes(creation),
+      ownerSession: selected,
+      availability: availability,
+    );
+    await receiver.applyIncomingName(
+      bytes(name),
+      ownerSession: selected,
+      availability: availability,
+    );
+    await receiver.applyIncomingDetails(
+      bytes(detail),
+      ownerSession: selected,
+      availability: availability,
+    );
+    await receiver.applyIncomingLifecycle(
+      bytes(state),
+      ownerSession: selected,
+      availability: availability,
+    );
+    expect(
+      (await f.bDb.select(f.bDb.companyJobNames).get()).single.operationBytes,
+      name,
+    );
+    expect(
+      (await f.bDb.select(f.bDb.companyJobDetails).get()).single.operationBytes,
+      detail,
+    );
+    expect(
+      (await f.bDb.select(f.bDb.companyJobLifecycles).get())
+          .single
+          .operationBytes,
+      state,
+    );
+    expect(f.bEnrollment.currentCompanySession, same(selected));
+    await peers.ac.dispose();
+    await peers.bc.dispose();
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  for (final fault in ['signout', 'reset', 'disable', 'store', 'channel']) {
+    test('private credential delivery refuses $fault after signing', () async {
+      final f = await JoinFixture.create(allowOwnerAdditions: true);
+      await activateFixtureB(f);
+      final selected = await f.aEnrollment.createRestrictedUser(
+        owner: f.owner,
+        requestId: const Uuid().v4(),
+        name: 'Selected',
+        pin: '0123',
+      );
+      final targetUser = await f.aEnrollment.createRestrictedUser(
+        owner: f.owner,
+        requestId: const Uuid().v4(),
+        name: 'Target',
+        pin: '4567',
+      );
+      final initial = await _peers(f);
+      for (final user in [selected, targetUser]) {
+        final request = await f.bEnrollment.prepareUserProvisionRequest(
+          peer: initial.b,
+          requestId: const Uuid().v4(),
+          userId: user.userId,
+        );
+        final bundle = await f.aEnrollment.prepareUserProvision(
+          owner: f.owner,
+          peer: initial.a,
+          request: await f.aEnrollment.receiveUserProvisionRequest(
+            request,
+            peer: initial.a,
+          ),
+        );
+        final ack = await f.bEnrollment.acceptUserProvision(
+          bundle,
+          peer: initial.b,
+        );
+        await f.aEnrollment.acceptUserProvisionReceipt(
+          ack,
+          peer: initial.a,
+          userId: user.userId,
+        );
+      }
+      await initial.ac.dispose();
+      await initial.bc.dispose();
+      await f.aEnrollment.resetRestrictedUserPin(
+        owner: f.owner,
+        userId: targetUser.userId,
+        requestId: const Uuid().v4(),
+        expectedCredentialVersion: 1,
+        pin: '6789',
+      );
+      final administrator = CompanyEnrollment(installation: f.a, db: f.aDb);
+      final admin = await administrator.signIn('1234');
+      final a = await f.aEnrollment.signInUser(selected.userId, '0123');
+      final b = await f.bEnrollment.signInUser(selected.userId, '0123');
+      final peers = await _peers(f, sessionA: a, sessionB: b);
+      final target = await f.aEnrollment.verifyUserLifecycleOffer(
+        await f.bEnrollment.createUserLifecycleOffer(
+          peers.b,
+          userId: targetUser.userId,
+        ),
+        peers.a,
+      );
+      final provider = _HoldCredentialSignature();
+      Cryptography.instance = provider;
+      try {
+        final pending = f.aEnrollment.prepareUserDisablePolicy(peers.a, target);
+        await provider.entered.future.timeout(const Duration(seconds: 60));
+        Cryptography.instance = DartCryptography.defaultInstance;
+        if (fault == 'signout') {
+          await f.aEnrollment.signOut();
+        } else if (fault == 'reset') {
+          await administrator.resetRestrictedUserPin(
+            owner: admin,
+            userId: selected.userId,
+            requestId: const Uuid().v4(),
+            expectedCredentialVersion: 1,
+            pin: '9876',
+          );
+        } else if (fault == 'disable') {
+          await administrator.disableRestrictedUser(
+            owner: admin,
+            userId: selected.userId,
+            requestId: const Uuid().v4(),
+          );
+        } else if (fault == 'store') {
+          final previous = f.aStore.states[f.a.namespace]!;
+          final changed =
+              jsonDecode(utf8.decode(previous.bytes)) as Map<String, dynamic>;
+          changed['store'] = const Uuid().v4();
+          await f.aStore.compareAndSwapState(
+            f.a.namespace,
+            expectedRevision: previous.revision,
+            nextRevision: const Uuid().v4(),
+            bytes: Uint8List.fromList(utf8.encode(jsonEncode(changed))),
+          );
+        } else {
+          await peers.ac.dispose();
+        }
+        provider.release.complete();
+        await expectLater(pending, throwsA(anything));
+      } finally {
+        Cryptography.instance = DartCryptography.defaultInstance;
+        if (!provider.release.isCompleted) provider.release.complete();
+        if (fault != 'channel') await peers.ac.dispose();
+        await peers.bc.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 4)));
+  }
+
+  test('restricted sync refuses private delivery without the owner recipient grant', () async {
+    final f = await JoinFixture.create(allowOwnerAdditions: true);
+    await activateFixtureB(f);
+    final selected = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Selected',
+      pin: '0123',
+    );
+    final other = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Other',
+      pin: '4567',
+    );
+    final initial = await _peers(f);
+    final request = await f.bEnrollment.prepareUserProvisionRequest(
+      peer: initial.b,
+      requestId: const Uuid().v4(),
+      userId: selected.userId,
+    );
+    final bundle = await f.aEnrollment.prepareUserProvision(
+      owner: f.aEnrollment.currentSession!,
+      peer: initial.a,
+      request: await f.aEnrollment.receiveUserProvisionRequest(
+        request,
+        peer: initial.a,
+      ),
+    );
+    final ack = await f.bEnrollment.acceptUserProvision(
+      bundle,
+      peer: initial.b,
+    );
+    await f.aEnrollment.acceptUserProvisionReceipt(
+      ack,
+      peer: initial.a,
+      userId: selected.userId,
+    );
+    await initial.ac.dispose();
+    await initial.bc.dispose();
+    await f.aEnrollment.resetRestrictedUserPin(
+      owner: f.aEnrollment.currentSession!,
+      userId: other.userId,
+      requestId: const Uuid().v4(),
+      expectedCredentialVersion: 1,
+      pin: '6789',
+    );
+    final aSession = await f.aEnrollment.signInUser(selected.userId, '0123');
+    final bSession = await f.bEnrollment.signInUser(selected.userId, '0123');
+    final peers = await _peers(f, sessionA: aSession, sessionB: bSession);
+    final target = await f.aEnrollment.verifyUserLifecycleOffer(
+      await f.bEnrollment.createUserLifecycleOffer(
+        peers.b,
+        userId: other.userId,
+      ),
+      peers.a,
+    );
+    final beforeSql = await sqlSnapshot(f.aDb);
+    final beforeProtected = Map.of(f.aStore.states);
+    await expectLater(
+      f.aEnrollment.prepareUserDisablePolicy(peers.a, target),
+      throwsA(
+        isA<CompanyBootstrapRefusal>().having(
+          (error) => error.message,
+          'reason',
+          'Owner authorization required for private credential delivery',
+        ),
+      ),
+    );
+    expect(await sqlSnapshot(f.aDb), beforeSql);
+    expectJoinProtectedUnchanged(f.aStore, beforeProtected);
+    expect(f.aEnrollment.currentCompanySession, same(aSession));
+    await f.aDb.customStatement(
+      'ALTER TABLE company_user_credential_grants ADD COLUMN unexpected TEXT',
+    );
+    final malformedSql = await sqlSnapshot(f.aDb);
+    final malformedProtected = Map.of(f.aStore.states);
+    await expectLater(
+      f.aEnrollment.prepareUserDisablePolicy(peers.a, target),
+      throwsA(isA<StateError>()),
+    );
+    expect(await sqlSnapshot(f.aDb), malformedSql);
+    expectJoinProtectedUnchanged(f.aStore, malformedProtected);
+    await peers.ac.dispose();
+    await peers.bc.dispose();
+  }, timeout: const Timeout(Duration(minutes: 7)));
+
+  test('malformed grant schema refuses Owner acknowledgment before protected mutation', () async {
+    final f = await JoinFixture.create();
+    await activateFixtureB(f);
+    final user = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Target',
+      pin: '0123',
+    );
+    final peers = await _peers(f);
+    final request = await f.bEnrollment.prepareUserProvisionRequest(
+      peer: peers.b,
+      requestId: const Uuid().v4(),
+      userId: user.userId,
+    );
+    final bundle = await f.aEnrollment.prepareUserProvision(
+      owner: f.owner,
+      peer: peers.a,
+      request: await f.aEnrollment.receiveUserProvisionRequest(
+        request,
+        peer: peers.a,
+      ),
+    );
+    final ack = await f.bEnrollment.acceptUserProvision(bundle, peer: peers.b);
+    await f.aDb.customStatement(
+      'ALTER TABLE company_user_credential_grants ADD COLUMN unexpected TEXT',
+    );
+    final beforeSql = await sqlSnapshot(f.aDb);
+    final beforeProtected = Map.of(f.aStore.states);
+    await expectLater(
+      f.aEnrollment.acceptUserProvisionReceipt(
+        ack,
+        peer: peers.a,
+        userId: user.userId,
+      ),
+      throwsA(isA<StateError>()),
+    );
+    expect(await sqlSnapshot(f.aDb), beforeSql);
+    expectJoinProtectedUnchanged(f.aStore, beforeProtected);
+    await peers.ac.dispose();
+    await peers.bc.dispose();
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
   test('v4 user Jobs sync through owner channel with same retained device and exact original user', () async {
     final f = await JoinFixture.create(allowOwnerAdditions: true);
     await activateFixtureB(f);
@@ -1267,6 +2332,78 @@ void main() {
       },
     );
   }
+  test('lost Owner provisioning context cannot mint a grant from an old acknowledgment', () async {
+    final f = await JoinFixture.create();
+    await activateFixtureB(f);
+    final user = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Receiver',
+      pin: '0123',
+    );
+    final first = await _peers(f);
+    final requestId = const Uuid().v4();
+    final request = await f.bEnrollment.prepareUserProvisionRequest(
+      peer: first.b,
+      requestId: requestId,
+      userId: user.userId,
+    );
+    final bundle = await f.aEnrollment.prepareUserProvision(
+      owner: f.owner,
+      peer: first.a,
+      request: await f.aEnrollment.receiveUserProvisionRequest(
+        request,
+        peer: first.a,
+      ),
+    );
+    final ack = await f.bEnrollment.acceptUserProvision(bundle, peer: first.b);
+    await f.aEnrollment.signOut();
+    await expectLater(
+      f.aEnrollment.acceptUserProvisionReceipt(
+        ack,
+        peer: first.a,
+        userId: user.userId,
+      ),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    expect(
+      await f.aDb.select(f.aDb.companyUserCredentialGrants).get(),
+      isEmpty,
+    );
+    await first.ac.dispose();
+    await first.bc.dispose();
+    final owner = await f.aEnrollment.signIn('1234');
+    final fresh = await _peers(f);
+    final retryRequest = await f.bEnrollment.prepareUserProvisionRequest(
+      peer: fresh.b,
+      requestId: requestId,
+      userId: user.userId,
+    );
+    final retryBundle = await f.aEnrollment.prepareUserProvision(
+      owner: owner,
+      peer: fresh.a,
+      request: await f.aEnrollment.receiveUserProvisionRequest(
+        retryRequest,
+        peer: fresh.a,
+      ),
+    );
+    final retryAck = await f.bEnrollment.acceptUserProvision(
+      retryBundle,
+      peer: fresh.b,
+    );
+    await f.aEnrollment.acceptUserProvisionReceipt(
+      retryAck,
+      peer: fresh.a,
+      userId: user.userId,
+    );
+    expect(
+      await f.aDb.select(f.aDb.companyUserCredentialGrants).get(),
+      hasLength(1),
+    );
+    await fresh.ac.dispose();
+    await fresh.bc.dispose();
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
   test('authenticated provisioning preserves recipient identity and PIN attempts on retry', () async {
     final f = await JoinFixture.create();
     await activateFixtureB(f);
@@ -1335,11 +2472,67 @@ void main() {
       f.bStore.states[companyUserNamespace(f.b.namespace)]!.bytes,
       beforeAttempts.bytes,
     );
+    final existingGrant =
+        (await f.aDb.select(f.aDb.companyUserCredentialGrants).get()).single;
+    await f.aDb.customStatement(
+      'UPDATE company_user_credential_grants SET grant_bytes = ? WHERE company_id = ? AND user_id = ? AND grant_key = ?',
+      [
+        'collision',
+        existingGrant.companyId,
+        existingGrant.userId,
+        existingGrant.grantKey,
+      ],
+    );
+    final collisionSql = await sqlSnapshot(f.aDb);
+    await expectLater(
+      f.aEnrollment.acceptUserProvisionReceipt(
+        retryAck,
+        peer: fresh.a,
+        userId: created.userId,
+      ),
+      throwsA(
+        isA<CompanyBootstrapRefusal>().having(
+          (e) => e.message,
+          'reason',
+          'Credential grant collision',
+        ),
+      ),
+    );
+    expect(await sqlSnapshot(f.aDb), collisionSql);
+    await f.aDb.customStatement(
+      'UPDATE company_user_credential_grants SET grant_bytes = ? WHERE company_id = ? AND user_id = ? AND grant_key = ?',
+      [
+        existingGrant.grantBytes,
+        existingGrant.companyId,
+        existingGrant.userId,
+        existingGrant.grantKey,
+      ],
+    );
+    final recoveryRequest = await f.bEnrollment.prepareUserProvisionRequest(
+      peer: fresh.b,
+      requestId: requestId,
+      userId: created.userId,
+    );
+    final recoveryBundle = await f.aEnrollment.prepareUserProvision(
+      owner: f.owner,
+      peer: fresh.a,
+      request: await f.aEnrollment.receiveUserProvisionRequest(
+        recoveryRequest,
+        peer: fresh.a,
+      ),
+    );
+    final recoveryAck = await f.bEnrollment.acceptUserProvision(
+      recoveryBundle,
+      peer: fresh.b,
+    );
     await f.aEnrollment.acceptUserProvisionReceipt(
-      retryAck,
+      recoveryAck,
       peer: fresh.a,
       userId: created.userId,
     );
+    final grants = await f.aDb.select(f.aDb.companyUserCredentialGrants).get();
+    expect(grants, hasLength(1));
+    expect(grants.single.grantBytes, existingGrant.grantBytes);
     await f.reopenB();
     final selected = await f.bEnrollment.signInUser(created.userId, '0123');
     expect(selected.identity.userId, created.userId);
