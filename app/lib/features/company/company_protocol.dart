@@ -439,6 +439,8 @@ final class CompanyEnrollment {
   int _authenticationEpoch = 0;
   String? _userProvisionOffer;
   _UserProvisionGrantContext? _userProvisionGrantContext;
+  _InitialUserTransfer? _initialUserTransfer;
+  _UserProvisionConfirmation? _userProvisionConfirmation;
 
   CompanySession? get currentCompanySession =>
       _session?.isValid == true ? _session : null;
@@ -470,6 +472,8 @@ final class CompanyEnrollment {
     _authenticationEpoch++;
     _userProvisionOffer = null;
     _userProvisionGrantContext = null;
+    _initialUserTransfer = null;
+    _userProvisionConfirmation = null;
     installation._activeCompanyChannel?.close();
     final session = _session;
     session?._clear();
