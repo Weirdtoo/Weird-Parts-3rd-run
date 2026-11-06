@@ -14,6 +14,7 @@ class CompanyJoinPage extends StatefulWidget {
   const CompanyJoinPage({
     required this.enrollment,
     this.approver,
+    this.syncSession,
     this.reconnect = false,
     this.createController,
     this.onJobSyncDiagnostic,
@@ -21,6 +22,7 @@ class CompanyJoinPage extends StatefulWidget {
   });
   final CompanyEnrollment enrollment;
   final OwnerSession? approver;
+  final CompanySession? syncSession;
   final bool reconnect;
   final NearbyController Function(String encounterAlias)? createController;
   final void Function(CreatedJobSyncDiagnostic)? onJobSyncDiagnostic;
@@ -62,6 +64,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
   bool _confirmed = false;
   bool _closed = false;
   bool get _approving => widget.approver != null && !widget.reconnect;
+  CompanySession get _syncSession => widget.syncSession ?? widget.approver!;
 
   String _provisionLabel(CompanyUserChoice user) {
     final duplicateName =
@@ -92,9 +95,9 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
     _run(() async {
       if (widget.reconnect) {
         final peers = await _authentication.retainedPeers(
-          session: widget.approver!,
+          session: _syncSession,
         );
-        final users = widget.approver!.identity.isAuthorityOwner
+        final users = widget.approver?.identity.isAuthorityOwner == true
             ? await widget.enrollment.listCompanyUsers()
             : <CompanyUserChoice>[];
         if (mounted) {
@@ -211,6 +214,9 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
         'user-provision-bundle',
         'user-provision-ack',
       ].contains(wire['kind'])) {
+        if (widget.approver == null) {
+          throw const CompanyBootstrapRefusal('Owner sign-in required');
+        }
         return _receiveUser(wire);
       }
       Map<String, Object?>? reply;
@@ -218,7 +224,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
         reply = await _authentication.receivePeerChallenge(
           channel,
           wire,
-          session: widget.approver!,
+          session: _syncSession,
         );
       } else if (wire['kind'] == 'peer-response') {
         reply = await _authentication.receivePeerResponse(channel, wire);
@@ -578,7 +584,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
     }
     final available = await CompanyJobSyncAvailability.open(
       enrollment: widget.enrollment,
-      owner: widget.approver!,
+      owner: _syncSession,
       peer: peer,
     );
     if (!mounted || _closed || (_jobSync?.isRunning ?? false)) {
@@ -646,7 +652,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
     final wire = await _authentication.beginPeerChallenge(
       channel,
       _selected!,
-      session: widget.approver!,
+      session: _syncSession,
     );
     if (mounted) {
       setState(
@@ -864,7 +870,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
               child: const Text('Verify selected retained peer'),
             ),
             if (_peerMembership != null &&
-                widget.approver!.identity.isAuthorityOwner &&
+                widget.approver?.identity.isAuthorityOwner == true &&
                 _provisionUsers.isNotEmpty) ...[
               DropdownButtonFormField<String>(
                 key: const Key('company-provision-user-selector'),

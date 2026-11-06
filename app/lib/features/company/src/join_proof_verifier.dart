@@ -25,6 +25,9 @@ final class JoinProofVerifier {
     'wiredpart.company.join.channel@1:',
     'wiredpart.company.join.issuance@1:',
     'wiredpart.company.join.activation@1:',
+    'wiredpart.company.user.authority@1:',
+    'wiredpart.company.user.state@1:',
+    'wiredpart.company.facts@2:',
   };
   final _completed = <_JoinProof>{};
   int _codeUnits = 0;

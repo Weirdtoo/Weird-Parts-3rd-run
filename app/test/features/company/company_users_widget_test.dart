@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' show SemanticsRole;
@@ -8,10 +9,23 @@ import 'package:wired_parts/features/company/company_gate.dart';
 import 'package:wired_parts/features/company/company_bootstrap.dart';
 import 'package:wired_parts/features/company/company_jobs_panel.dart';
 import 'package:wired_parts/features/installation/installation_security.dart';
+import 'package:wired_parts/features/nearby/nearby_controller.dart';
 import 'package:wired_parts/features/job_line_commands/job_line_commands.dart';
 import 'package:uuid/uuid.dart';
 
-import 'company_join_test.dart' show JoinFixture;
+import 'company_join_test.dart' show JoinFixture, JoinTestDiscovery;
+
+class _OfflineJoinController extends NearbyController {
+  _OfflineJoinController(String alias)
+    : super(
+        deviceId: alias,
+        deviceName: alias,
+        discovery: JoinTestDiscovery(),
+        companyJoin: true,
+      );
+  @override
+  Future<void> start() async {}
+}
 
 Future<void> _wait(WidgetTester tester, Finder finder) async {
   for (var i = 0; i < 400 && finder.evaluate().isEmpty; i++) {
@@ -677,6 +691,82 @@ void main() {
   );
 
   testWidgets(
+    'reset while retained peer route is open refuses stale user after Back',
+    (tester) async {
+      late JoinFixture f;
+      late String userId;
+      await tester.runAsync(() async {
+        f = await JoinFixture.create(allowOwnerAdditions: true);
+        userId = (await f.aEnrollment.createRestrictedUser(
+          owner: f.owner,
+          requestId: const Uuid().v4(),
+          name: 'Selected route user',
+          pin: '0123',
+        )).userId;
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CompanyBootstrapGate(
+            db: f.aDb,
+            installation: f.a,
+            createJoinController: _OfflineJoinController.new,
+          ),
+        ),
+      );
+      await _wait(tester, find.byKey(const Key('company-user-selector')));
+      await tester.tap(find.byKey(const Key('company-user-selector')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Selected route user').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('company-signin-pin')),
+        '0123',
+      );
+      await tester.runAsync(
+        () async => tester.tap(find.byKey(const Key('company-signin'))),
+      );
+      await _wait(tester, find.byKey(const Key('company-job-name')));
+      await tester.ensureVisible(find.byKey(const Key('company-peer-open')));
+      await tester.runAsync(
+        () async => tester.tap(find.byKey(const Key('company-peer-open'))),
+      );
+      await _wait(tester, find.text('Verify retained company peer'));
+      for (
+        var i = 0;
+        i < 400 &&
+            find.byKey(const Key('company-join-busy')).evaluate().isNotEmpty;
+        i++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 25)),
+        );
+        await tester.pump(const Duration(milliseconds: 25));
+      }
+      expect(find.byKey(const Key('company-join-busy')), findsNothing);
+      final jobsBefore = await tester.runAsync(
+        () => f.aDb.select(f.aDb.companyJobs).get(),
+      );
+      await tester.runAsync(
+        () => f.aEnrollment.resetRestrictedUserPin(
+          owner: f.owner,
+          userId: userId,
+          requestId: const Uuid().v4(),
+          expectedCredentialVersion: 1,
+          pin: '4567',
+        ),
+      );
+      await tester.runAsync(() async => tester.tap(find.byTooltip('Back')));
+      await _wait(tester, find.textContaining('Company Jobs are locked'));
+      expect(find.byKey(const Key('company-create-job')), findsNothing);
+      expect(
+        (await tester.runAsync(() => f.aDb.select(f.aDb.companyJobs).get()))!,
+        jobsBefore,
+      );
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
     'owner creates named user and switches to restricted offline Job through production gate',
     (tester) async {
       late JoinFixture f;
@@ -686,7 +776,11 @@ void main() {
       });
       await tester.pumpWidget(
         MaterialApp(
-          home: CompanyBootstrapGate(db: f.aDb, installation: f.a),
+          home: CompanyBootstrapGate(
+            db: f.aDb,
+            installation: f.a,
+            createJoinController: _OfflineJoinController.new,
+          ),
         ),
       );
       await _wait(tester, find.byKey(const Key('company-signin')));
@@ -808,17 +902,99 @@ void main() {
         find.byKey(const Key('company-signin-pin')),
         '0123',
       );
-      await tester.runAsync(
-        () async => tester.tap(find.byKey(const Key('company-signin'))),
+      final loadEntered = Completer<void>();
+      final releaseLoad = Completer<void>();
+      f.aStore.beforeRead = (namespace) {
+        if (namespace == f.a.namespace &&
+            find.byType(CompanyJobsPanel).evaluate().isNotEmpty &&
+            !loadEntered.isCompleted) {
+          loadEntered.complete();
+          return releaseLoad.future;
+        }
+        return null;
+      };
+      try {
+        await tester.runAsync(
+          () async => tester.tap(find.byKey(const Key('company-signin'))),
+        );
+        await _wait(tester, find.textContaining('Company ID:'));
+        await tester.runAsync(
+          () => loadEntered.future.timeout(const Duration(seconds: 10)),
+        );
+        expect(find.byKey(const Key('company-enroll-open')), findsNothing);
+        await tester.runAsync(
+          () async => tester.tap(find.byKey(const Key('company-peer-open'))),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          find.text('Verify retained company peer'),
+          findsNothing,
+          reason: 'A fast tap must not open the route while Jobs authority is loading',
+        );
+        final peerButton = tester.widget<OutlinedButton>(
+          find.byKey(const Key('company-peer-open')),
+        );
+        expect(
+          peerButton.onPressed,
+          isNull,
+          reason: 'Peer entry must wait for the first Jobs load to finish',
+        );
+      } finally {
+        f.aStore.beforeRead = null;
+        releaseLoad.complete();
+      }
+      await _wait(tester, find.byKey(const Key('company-job-name')));
+      final initialJobsPanelKey = tester
+          .widget<CompanyJobsPanel>(find.byType(CompanyJobsPanel))
+          .key;
+      expect(
+        tester
+            .widget<OutlinedButton>(find.byKey(const Key('company-peer-open')))
+            .onPressed,
+        isNotNull,
       );
-      await _wait(tester, find.textContaining('Company ID:'));
-      expect(find.byKey(const Key('company-enroll-open')), findsNothing);
-      expect(find.byKey(const Key('company-peer-open')), findsNothing);
+      await tester.runAsync(
+        () async => tester.tap(find.byKey(const Key('company-peer-open'))),
+      );
+      await _wait(tester, find.text('Verify retained company peer'));
+      for (
+        var i = 0;
+        i < 400 &&
+            find.byKey(const Key('company-join-busy')).evaluate().isNotEmpty;
+        i++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 25)),
+        );
+        await tester.pump(const Duration(milliseconds: 25));
+      }
+      expect(find.byKey(const Key('company-join-busy')), findsNothing);
+      await tester.runAsync(() async => tester.tap(find.byTooltip('Back')));
+      await tester.pumpAndSettle();
+      await _wait(tester, find.text('Create Job permission only.'));
+      await _wait(
+        tester,
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is CompanyJobsPanel && widget.key != initialJobsPanelKey,
+        ),
+      );
+      await _wait(
+        tester,
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is OutlinedButton &&
+              widget.key == const Key('company-peer-open') &&
+              widget.onPressed != null,
+        ),
+      );
+      await _wait(tester, find.byKey(const Key('company-job-name')));
+      expect(find.textContaining('Company Jobs are locked'), findsNothing);
       expect(find.byKey(const Key('company-join-open')), findsNothing);
       expect(find.byKey(const Key('company-join-resume')), findsNothing);
       expect(find.byKey(const Key('company-create-user')), findsNothing);
       await tester.scrollUntilVisible(
-        find.textContaining('Create Job permission only. Sign in as the owner'),
+        find.text('Create Job permission only.'),
         200,
         scrollable: find.byType(Scrollable).first,
       );

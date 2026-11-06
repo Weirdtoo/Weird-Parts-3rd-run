@@ -2,6 +2,28 @@ part of '../installation/installation_security.dart';
 
 const _userAuthorityDomain = 'wiredpart.company.user.authority@1:';
 const _userNameByteLimit = 64;
+const _credentialGrantDomain = 'wiredpart.company.user.credential.grant@1:';
+
+final class _UserProvisionGrantContext {
+  _UserProvisionGrantContext(
+    this.owner,
+    this.peer,
+    this.userId,
+    this.request,
+    this.accountCommitment,
+    this.certificate,
+    this.source,
+    this.recipient,
+  );
+  final OwnerSession owner;
+  final VerifiedPeerMembership peer;
+  final String userId;
+  final String request;
+  final String accountCommitment;
+  final String certificate;
+  final String source;
+  final String recipient;
+}
 
 /// Current release capacity; storage locators are never company user identities.
 const kCompanyUserCapacity = 2;
@@ -589,9 +611,47 @@ extension CompanyUsers on CompanyEnrollment {
     userId: invitation.userId,
   );
 
-  Future<void> _requireSessionAccount(CompanySession session) async {
+  Future<void> _requireSessionAccount(CompanySession session) =>
+      _validateSessionAccount(session, syncOnly: false);
+
+  Future<void> _requireSyncSessionAccount(CompanySession session) =>
+      _validateSessionAccount(session, syncOnly: true);
+
+  Future<void> _validateSessionAccount(
+    CompanySession session, {
+    required bool syncOnly,
+  }) async {
     if (session is! RestrictedUserSession) return;
-    final account = await _readUserAccount(userId: session.identity.userId);
+    if (syncOnly) {
+      final trust = installation._record?.companyTrust;
+      if (trust == null) {
+        session._clear();
+        throw const CompanyBootstrapRefusal('Selected user authority changed');
+      }
+      try {
+        final user = await _resolveActiveUserAuthority(
+          db,
+          installation,
+          trust,
+          installation.knownSecurityFloors,
+          session._certificate,
+          selectedOnly: true,
+          expectedCommitment: session._accountCommitment,
+        );
+        if (user.user['id'] != session.identity.userId) {
+          throw const CompanyBootstrapRefusal('Selected user identity changed');
+        }
+        session.validateAuthority(trust, installation.knownSecurityFloors);
+      } on CompanyBootstrapRefusal {
+        session._clear();
+        rethrow;
+      }
+      return;
+    }
+    var account = await _readUserAccount(
+      userId: session.identity.userId,
+      reconcile: true,
+    );
     final trust = installation._record?.companyTrust;
     if (account == null ||
         trust == null ||
@@ -638,6 +698,23 @@ extension CompanyUsers on CompanyEnrollment {
     }
   }
 
+  Future<void> _requireUserSyncPeer(VerifiedPeerMembership peer) async {
+    if (!identical(peer._owner.enrollment, this)) {
+      throw const CompanyBootstrapRefusal(
+        'User sync belongs to another installation',
+      );
+    }
+    if (!identical(currentCompanySession, peer._held.owner)) {
+      throw const CompanyBootstrapRefusal('Selected user sync session changed');
+    }
+    peer._held.permit.requireLive();
+    await peer.requireCurrent();
+    if (!identical(currentCompanySession, peer._held.owner)) {
+      throw const CompanyBootstrapRefusal('Selected user sync session changed');
+    }
+    peer._held.permit.requireLive();
+  }
+
   List<Object?> _userPeerBinding(
     ResolvedCompanyMembership member,
     String store,
@@ -651,7 +728,20 @@ extension CompanyUsers on CompanyEnrollment {
   ];
 
   Future<NearbyJoinChannel> _userChannel(VerifiedPeerMembership peer) async {
-    await _requireUserPeer(peer);
+    return _deriveUserChannel(peer, () => _requireUserPeer(peer));
+  }
+
+  Future<NearbyJoinChannel> _userSyncChannel(
+    VerifiedPeerMembership peer,
+  ) async {
+    return _deriveUserChannel(peer, () => _requireUserSyncPeer(peer));
+  }
+
+  Future<NearbyJoinChannel> _deriveUserChannel(
+    VerifiedPeerMembership peer,
+    Future<void> Function() requireCurrent,
+  ) async {
+    await requireCurrent();
     final channel = peer._held.channel;
     Future<SecretKey> derive(SecretKey key, String direction) =>
         Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
@@ -665,7 +755,7 @@ extension CompanyUsers on CompanyEnrollment {
       await derive(channel._send, channel._keys.sendDirection),
       await derive(channel._receive, channel._keys.receiveDirection),
     );
-    await _requireUserPeer(peer);
+    await requireCurrent();
     return result;
   }
 
@@ -783,6 +873,8 @@ extension CompanyUsers on CompanyEnrollment {
     required VerifiedPeerMembership peer,
     required VerifiedUserProvisionRequest request,
   }) async {
+    _userProvisionGrantContext = null;
+    await requireCompanyJoinSchema(db);
     if (!identical(request._peer, peer)) {
       throw const CompanyBootstrapRefusal(
         'User request belongs to another channel',
@@ -886,6 +978,16 @@ extension CompanyUsers on CompanyEnrollment {
       await _checkUserAccount(latest!);
       await _requireUserAdministrator(owner);
       await _requireUserPeer(peer);
+      _userProvisionGrantContext = _UserProvisionGrantContext(
+        owner,
+        peer,
+        verifiedRequest.userId,
+        verifiedRequest.requestId,
+        account.identityCommitment,
+        user.commitment,
+        _securityCanonical(source),
+        _securityCanonical(target),
+      );
       return {'box': box, 'issuance': issuance};
     });
   }
@@ -915,6 +1017,7 @@ extension CompanyUsers on CompanyEnrollment {
     Map<String, Object?> wire, {
     required VerifiedPeerMembership peer,
   }) async {
+    await requireCompanyJoinSchema(db);
     final snapshot = _securityCanonical(wire);
     if (utf8.encode(snapshot).length > 8192) {
       throw const CompanyBootstrapRefusal('User envelope capacity reached');
@@ -1128,6 +1231,7 @@ extension CompanyUsers on CompanyEnrollment {
     required VerifiedPeerMembership peer,
     required String userId,
   }) async {
+    await requireCompanyJoinSchema(db);
     await _requireUserPeer(peer);
     final channel = await _userChannel(peer);
     final signed = _joinObject(
@@ -1176,6 +1280,107 @@ extension CompanyUsers on CompanyEnrollment {
         },
       );
     }
+    final context = _userProvisionGrantContext;
+    if (context != null &&
+        identical(context.peer, peer) &&
+        context.userId == userId &&
+        context.request == receiptBody['request']) {
+      await _saveCredentialDeliveryGrant(
+        context,
+        receiptBody,
+        signed['signature'] as String,
+      );
+      if (identical(_userProvisionGrantContext, context)) {
+        _userProvisionGrantContext = null;
+      }
+    }
+  }
+
+  Future<void> _saveCredentialDeliveryGrant(
+    _UserProvisionGrantContext context,
+    Map<String, Object?> receipt,
+    String receiptSignature,
+  ) async {
+    Future<_CompanyCustody> requireContext() async {
+      if (!identical(_userProvisionGrantContext, context) ||
+          !identical(currentSession, context.owner)) {
+        throw const CompanyBootstrapRefusal(
+          'Owner provisioning context changed',
+        );
+      }
+      final custody = await _requireUserAdministrator(context.owner);
+      await _requireUserPeer(context.peer);
+      final account = await _readUserAccount(userId: context.userId);
+      if (account == null ||
+          account.isCurrentState ||
+          account.isDisabled ||
+          account.identityCommitment != context.accountCommitment ||
+          _joinDigest(jsonDecode(account.certificate)) != context.certificate ||
+          _securityCanonical(receipt['sender']) != context.source ||
+          _securityCanonical(receipt['recipient']) != context.recipient ||
+          _securityCanonical(await _lifecycleLocalBinding()) !=
+              context.source ||
+          _securityCanonical((await _userReceiptBody(account))) !=
+              _securityCanonical(receipt) ||
+          account.values['r'] != receiptSignature) {
+        throw const CompanyBootstrapRefusal(
+          'Owner provisioning context differs',
+        );
+      }
+      return custody;
+    }
+
+    final custody = await requireContext();
+    final trust = installation._record!.companyTrust!;
+    final keyPair = await Ed25519().newKeyPairFromSeed(custody.rootSeed);
+    final publicKey = await keyPair.extractPublicKey();
+    if (base64Encode(publicKey.bytes) != base64Encode(trust.rootKey)) {
+      throw const CompanyBootstrapRefusal('Grant authority differs');
+    }
+    final body = <String, Object?>{
+      'v': 1,
+      'kind': 'company.user.credential.grant@1',
+      'purpose': 'existing-credential-updates',
+      'company': custody.company,
+      'shop': custody.shop,
+      'user': context.userId,
+      'creation': context.certificate,
+      'source': jsonDecode(context.source),
+      'recipient': jsonDecode(context.recipient),
+    };
+    final key = _joinDigest(body);
+    final signature = await Ed25519().sign(
+      utf8.encode('$_credentialGrantDomain${_securityCanonical(body)}'),
+      keyPair: keyPair,
+    );
+    final bytes = _securityCanonical({
+      'body': body,
+      'signature': base64Encode(signature.bytes),
+    });
+    await requireContext();
+    await db.transaction(() async {
+      final existing = await db
+          .customSelect(
+            'SELECT grant_bytes FROM company_user_credential_grants WHERE company_id = ? AND user_id = ? AND grant_key = ?',
+            variables: [
+              Variable(custody.company),
+              Variable(context.userId),
+              Variable(key),
+            ],
+          )
+          .getSingleOrNull();
+      if (existing != null && existing.read<String>('grant_bytes') != bytes) {
+        throw const CompanyBootstrapRefusal('Credential grant collision');
+      }
+      await requireContext();
+      if (existing == null) {
+        await db.customStatement(
+          'INSERT INTO company_user_credential_grants (company_id,user_id,grant_key,grant_bytes) VALUES (?,?,?,?)',
+          [custody.company, context.userId, key, bytes],
+        );
+      }
+      await requireContext();
+    });
   }
 
   Future<_UserAccounts> _readUserAccounts({bool reconcile = true}) async {
@@ -1626,6 +1831,7 @@ extension CompanyUsers on CompanyEnrollment {
       }),
       installation._membershipCommitment!,
       account.identityCommitment,
+      account.certificate,
     );
     _session = session;
     return session;

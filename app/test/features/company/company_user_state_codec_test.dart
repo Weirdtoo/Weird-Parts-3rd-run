@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:cryptography/dart.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:uuid/uuid.dart';
 import 'package:drift/native.dart';
@@ -510,6 +511,9 @@ void main() {
   });
 
   test('real current floors apply to current epoch while original epoch-one provenance remains verifiable', () async {
+    final previousProvider = Cryptography.instance;
+    Cryptography.instance = DartCryptography.defaultInstance;
+    addTearDown(() => Cryptography.instance = previousProvider);
     final f = await _SignedFixture.create('Floors');
     final packed = await f.certificate(sequence: 2, credential: 2);
     final trust = (await f.installation.readCompanyTrust(f.db))!;
@@ -527,6 +531,17 @@ void main() {
     );
     expect(certificate.originalCertificateBytes, f.original);
     expect(floors, saved);
+    final beforeWarm = joinProofVerificationStatistics;
+    await CompanyUserStateCertificate.verify(
+      canonicalJoinTest(packed),
+      db: f.db,
+      trust: trust,
+      floors: floors,
+    );
+    expect(
+      joinProofVerificationStatistics.hits,
+      greaterThanOrEqualTo(beforeWarm.hits + 2),
+    );
     for (final extra in [
       {'credential.$user': 3},
       {'revocation.user.$user': 1},

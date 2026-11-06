@@ -31,6 +31,7 @@ void main() {
     'company_authority_facts',
     'company_user_events',
     'company_user_deliveries',
+    'company_user_credential_grants',
   ]) {
     test(
       'schema10 projection refuses nonempty $history without changing schema or rows',
@@ -101,7 +102,7 @@ void main() {
                 "SELECT name FROM sqlite_master WHERE type = 'table'",
               )
               .get(),
-          hasLength(38),
+          hasLength(39),
         );
       },
     );
@@ -175,7 +176,7 @@ void main() {
                 "SELECT name FROM sqlite_master WHERE type = 'table'",
               )
               .get(),
-          hasLength(38),
+          hasLength(39),
         );
       },
     );

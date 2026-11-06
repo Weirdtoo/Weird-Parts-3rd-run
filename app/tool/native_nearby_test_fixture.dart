@@ -436,7 +436,10 @@ final class NativeFixtureSnapshot {
         if (name == 'company_job_lifecycles' ||
             name == 'company_job_lifecycle_peer_acks' ||
             name == 'warehouse_locations' ||
-            name == 'warehouse_counts') {
+            name == 'warehouse_counts' ||
+            name == 'company_user_events' ||
+            name == 'company_user_deliveries' ||
+            name == 'company_user_credential_grants') {
           continue;
         }
         if (version == 2 && !_schema2Columns.containsKey(name)) continue;

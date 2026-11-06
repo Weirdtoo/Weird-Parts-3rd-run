@@ -373,8 +373,61 @@ final class RestrictedUserSession extends CompanySession {
     super.authoritySnapshot,
     super.membershipSnapshot,
     this._accountCommitment,
+    this._certificate,
   ) : super._();
   final String _accountCommitment;
+  final String _certificate;
+}
+
+final class DeviceSyncPermit {
+  DeviceSyncPermit._(
+    this._enrollment,
+    this._session,
+    this._epoch,
+    this._binding,
+  );
+
+  final CompanyEnrollment _enrollment;
+  final CompanySession _session;
+  final int _epoch;
+  final String _binding;
+
+  CompanyIdentity get identity => _session.identity;
+
+  void requireLive() {
+    if (_enrollment._authenticationEpoch != _epoch ||
+        !identical(_enrollment.currentCompanySession, _session) ||
+        _enrollment.installation.identity == null ||
+        _enrollment.installation.receivingStoreGeneration == null ||
+        _securityCanonical(_enrollment._userBinding()) != _binding) {
+      throw const CompanyBootstrapRefusal('Device sync session changed');
+    }
+  }
+
+  Future<void> requireCurrent() async {
+    requireLive();
+    final trust = await _enrollment.installation.readCompanyTrust(
+      _enrollment.db,
+    );
+    if (trust == null) {
+      throw const CompanyBootstrapRefusal('Company authority unavailable');
+    }
+    requireLive();
+    final floors = _enrollment.installation.knownSecurityFloors;
+    _session.validateAuthority(trust, floors);
+    await _enrollment._requireSyncSessionAccount(_session);
+    requireLive();
+    _session.validateAuthority(trust, floors);
+  }
+
+  Future<T> run<T>(Future<T> Function() operation) async {
+    return _session.runLocalCommand(() async {
+      await requireCurrent();
+      final result = await operation();
+      await requireCurrent();
+      return result;
+    });
+  }
 }
 
 final class CompanyEnrollment {
@@ -385,6 +438,7 @@ final class CompanyEnrollment {
   CompanySession? _session;
   int _authenticationEpoch = 0;
   String? _userProvisionOffer;
+  _UserProvisionGrantContext? _userProvisionGrantContext;
 
   CompanySession? get currentCompanySession =>
       _session?.isValid == true ? _session : null;
@@ -393,9 +447,29 @@ final class CompanyEnrollment {
     _ => null,
   };
 
+  Future<DeviceSyncPermit> deviceSyncPermit() async {
+    final session = currentCompanySession;
+    if (session == null) {
+      throw const CompanyBootstrapRefusal('Company sign-in required');
+    }
+    if (installation.identity == null ||
+        installation.receivingStoreGeneration == null) {
+      throw const CompanyBootstrapRefusal('Installation identity unavailable');
+    }
+    final permit = DeviceSyncPermit._(
+      this,
+      session,
+      _authenticationEpoch,
+      _securityCanonical(_userBinding()),
+    );
+    await permit.requireCurrent();
+    return permit;
+  }
+
   Future<void> signOut() async {
     _authenticationEpoch++;
     _userProvisionOffer = null;
+    _userProvisionGrantContext = null;
     installation._activeCompanyChannel?.close();
     final session = _session;
     session?._clear();
@@ -2334,12 +2408,11 @@ Future<Map<String, dynamic>> _verifyFactLineage({
     }
     final signature = base64Decode(signed['signature'] as String);
     if (signature.length != 64 ||
-        !await Ed25519().verify(
-          utf8.encode('wiredpart.company.facts@2:${_securityCanonical(body)}'),
-          signature: Signature(
-            signature,
-            publicKey: SimplePublicKey(root, type: KeyPairType.ed25519),
-          ),
+        !await _joinProofVerifier.verify(
+          domain: 'wiredpart.company.facts@2:',
+          canonicalBody: () => _securityCanonical(body),
+          publicKeyText: base64Encode(root),
+          signatureText: signed['signature'] as String,
         )) {
       throw const CompanyBootstrapRefusal('Company authority signature failed');
     }
@@ -2532,12 +2605,13 @@ Future<bool> _companyCustodyReady(
   } catch (_) {
     return false;
   }
-  final key = SimplePublicKey(trust.rootKey, type: KeyPairType.ed25519);
   final encodedSignature = signed['signature'];
   if (encodedSignature is! String ||
-      !await Ed25519().verify(
-        utf8.encode('wiredpart.company.facts@2:${_securityCanonical(body)}'),
-        signature: Signature(base64Decode(encodedSignature), publicKey: key),
+      !await _joinProofVerifier.verify(
+        domain: 'wiredpart.company.facts@2:',
+        canonicalBody: () => _securityCanonical(body),
+        publicKeyText: base64Encode(trust.rootKey),
+        signatureText: encodedSignature,
       )) {
     return false;
   }

@@ -29,6 +29,7 @@ void main() {
     'company_job_lifecycle_peer_acks',
     'company_user_events',
     'company_user_deliveries',
+    'company_user_credential_grants',
   ]) {
     for (final malformed in ['missing', 'wrong columns']) {
       test(
@@ -55,6 +56,80 @@ void main() {
         },
       );
     }
+  }
+
+  for (final malformed in ['missing', 'wrong columns', 'extra column']) {
+    test(
+      'schema14 $malformed credential grant table refuses restore before live mutation',
+      () async {
+        final temp = Directory.systemTemp.createTempSync(
+          'grant-schema-restore-',
+        );
+        addTearDown(() => temp.deleteSync(recursive: true));
+        final source = File(p.join(temp.path, 'source.sqlite'));
+        final db = AppDatabase.forTesting(NativeDatabase(source));
+        await db.customSelect('SELECT 1').get();
+        await db.close();
+        final original = source.readAsBytesSync();
+        final raw = sqlite3.sqlite3.open(source.path);
+        try {
+          expect(raw.select('PRAGMA user_version').single.values.single, 14);
+          if (malformed == 'extra column') {
+            raw.execute(
+              'ALTER TABLE company_user_credential_grants ADD COLUMN unexpected TEXT',
+            );
+          } else {
+            raw.execute('DROP TABLE company_user_credential_grants');
+            if (malformed == 'wrong columns') {
+              raw.execute(
+                'CREATE TABLE company_user_credential_grants (wrong TEXT)',
+              );
+            }
+          }
+        } finally {
+          raw.dispose();
+        }
+        final malformedBytes = source.readAsBytesSync();
+        final live = Directory(p.join(temp.path, 'live'))..createSync();
+        final file = File(p.join(live.path, kSqliteFileName))
+          ..writeAsBytesSync(original);
+        final photos = Directory(p.join(live.path, 'part_photos'))
+          ..createSync();
+        final photo = File(p.join(photos.path, 'preserve.png'))
+          ..writeAsBytesSync([7, 8, 9]);
+        final marker = File(p.join(live.path, kRestoreSwapMarkerName))
+          ..writeAsStringSync('leave this marker alone');
+        await expectLater(
+          BackupStore(
+            supportDir: live,
+            afterParkLive: () async => fail('Must not begin swap'),
+          ).replaceWithPayload(
+            payload: BackupPayload(
+              createdAt: DateTime.utc(2026, 11, 4),
+              sourceDeviceId: 'synthetic',
+              sqliteBytes: malformedBytes,
+              photos: const {},
+            ),
+            reset: LocalDataReset(supportDir: live, documentsDir: live),
+          ),
+          throwsA(
+            isA<BackupFormatException>().having(
+              (error) => error.message,
+              'message',
+              'Unsupported or incomplete company enrollment schema',
+            ),
+          ),
+        );
+        expect(source.readAsBytesSync(), malformedBytes);
+        expect(file.readAsBytesSync(), original);
+        expect(photo.readAsBytesSync(), [7, 8, 9]);
+        expect(marker.readAsStringSync(), 'leave this marker alone');
+        expect(
+          Directory(p.join(live.path, kRestoreStagingName)).existsSync(),
+          isFalse,
+        );
+      },
+    );
   }
 
   test(
@@ -224,6 +299,7 @@ void main() {
     }
     await source.customStatement('DROP TABLE company_user_events');
     await source.customStatement('DROP TABLE company_user_deliveries');
+    await source.customStatement('DROP TABLE company_user_credential_grants');
     await source.customStatement('PRAGMA user_version = 1');
     await source.close();
     final original = File(p.join(scenario.source.support.path, kSqliteFileName))

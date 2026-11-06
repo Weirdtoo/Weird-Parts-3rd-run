@@ -79,6 +79,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
   bool _foreground = true;
   int _loginIntentEpoch = 0;
   int _jobsViewEpoch = 0;
+  bool _jobsInitialLoadFinished = false;
 
   List<CompanyUserChoice> get _additionalUsers => _users.skip(1).toList();
   bool get _userDirectoryValid =>
@@ -172,7 +173,12 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
   Future<void> _lock() async {
     _loginIntentEpoch++;
     _expiryTimer?.cancel();
-    if (mounted) setState(() => _session = null);
+    if (mounted) {
+      setState(() {
+        _session = null;
+        _jobsInitialLoadFinished = false;
+      });
+    }
     await _enrollment.signOut();
     if (mounted) await _load();
   }
@@ -185,9 +191,12 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
         (_status == CompanyBootstrapStatus.unjoined ||
             _status == CompanyBootstrapStatus.pendingJoin);
     if (!joining &&
-        (owner is! OwnerSession ||
+        (owner == null ||
+            !_jobsInitialLoadFinished ||
             !owner.isValid ||
-            (!reconnect && !owner.identity.isAuthorityOwner))) {
+            (!reconnect &&
+                (owner is! OwnerSession ||
+                    !owner.identity.isAuthorityOwner)))) {
       return;
     }
     await Navigator.of(context).push(
@@ -195,14 +204,18 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
         builder: (_) => CompanyJoinPage(
           enrollment: _enrollment,
           approver: owner is OwnerSession ? owner : null,
+          syncSession: reconnect ? owner : null,
           reconnect: reconnect,
           createController: widget.createJoinController,
         ),
       ),
     );
-    if (mounted) {
-      setState(() => _jobsViewEpoch++);
+    if (mounted && identical(_session, owner)) {
+      setState(() => _jobsInitialLoadFinished = false);
       await _load();
+      if (mounted && identical(_session, owner)) {
+        setState(() => _jobsViewEpoch++);
+      }
     }
   }
 
@@ -392,6 +405,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
       if (mounted && _foreground && loginIntent == _loginIntentEpoch) {
         setState(() {
           _session = session;
+          _jobsInitialLoadFinished = false;
           _users = users;
           _selectedUser = session.identity.userId;
           _status = CompanyBootstrapStatus.active;
@@ -560,7 +574,10 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
       final session = await _enrollment.signInUser(selected, _pin.text);
       _pin.clear();
       if (mounted && _foreground && loginIntent == _loginIntentEpoch) {
-        setState(() => _session = session);
+        setState(() {
+          _session = session;
+          _jobsInitialLoadFinished = false;
+        });
         _scheduleExpiry(session);
       } else {
         await _enrollment.signOut();
@@ -625,6 +642,7 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
       if (mounted && _foreground && loginIntent == _loginIntentEpoch) {
         setState(() {
           _session = session;
+          _jobsInitialLoadFinished = false;
           _status = CompanyBootstrapStatus.active;
         });
         _scheduleExpiry(session);
@@ -896,30 +914,30 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
       ]);
     }
     final identity = session.identity;
+    final jobsEpoch = _jobsViewEpoch;
     return _frame(identity.name, [
       const Text('Company authority is active on this installation.'),
       const SizedBox(height: 16),
       if (session is OwnerSession && identity.isAuthorityOwner)
         OutlinedButton(
           key: const Key('company-enroll-open'),
-          onPressed: _busy ? null : _joinNearby,
+          onPressed: _busy || !_jobsInitialLoadFinished ? null : _joinNearby,
           child: const Text('Approve a nearby company device'),
         ),
-      if (session is OwnerSession)
-        OutlinedButton(
-          key: const Key('company-peer-open'),
-          onPressed: _busy ? null : () => _joinNearby(reconnect: true),
-          child: const Text('Verify a retained company peer'),
-        ),
+      OutlinedButton(
+        key: const Key('company-peer-open'),
+        onPressed: _busy || !_jobsInitialLoadFinished
+            ? null
+            : () => _joinNearby(reconnect: true),
+        child: const Text('Verify a retained company peer'),
+      ),
       Text('Company ID: ${identity.companyId}'),
       Text('Shop ID: ${identity.shopId}'),
       Text('User ID: ${identity.userId}'),
       Text('Device ID: ${identity.deviceId}'),
       const SizedBox(height: 16),
       if (session is RestrictedUserSession)
-        const Text(
-          'Create Job permission only. Sign in as the owner to exchange pending Jobs with a retained peer.',
-        ),
+        const Text('Create Job permission only.'),
       if (session is OwnerSession &&
           !identity.isAuthorityOwner &&
           _userLifecycle?.disabled == true)
@@ -935,6 +953,15 @@ class _CompanyBootstrapGateState extends State<CompanyBootstrapGate>
         key: ValueKey('${session.sessionId}:$_jobsViewEpoch'),
         commands: CompanyJobCommands(enrollment: _enrollment),
         owner: session,
+        onInitialLoadFinished: () {
+          if (mounted &&
+              identical(_session, session) &&
+              _jobsViewEpoch == jobsEpoch &&
+              session.isValid &&
+              !_jobsInitialLoadFinished) {
+            setState(() => _jobsInitialLoadFinished = true);
+          }
+        },
       ),
       const SizedBox(height: 16),
       if (session is OwnerSession && identity.isAuthorityOwner) ...[

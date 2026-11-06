@@ -1080,8 +1080,9 @@ extension CompanyJobLifecycleCommands on CompanyJobCommands {
 
   Future<List<CompanyJobLifecycle>> lifecycleSyncHoldings({
     required CompanySession ownerSession,
+    CompanyJobSyncAvailability? availability,
   }) async {
-    await requireSyncPermission(ownerSession);
+    await requireSyncPermission(ownerSession, availability: availability);
     final scope = ownerSession.identity;
     final rows =
         await (_db.select(_db.companyJobLifecycles)
@@ -1099,15 +1100,19 @@ extension CompanyJobLifecycleCommands on CompanyJobCommands {
     for (final row in rows) {
       await _verifyLifecycleRecord(row, verified: verified);
     }
-    await requireSyncPermission(ownerSession);
+    await requireSyncPermission(ownerSession, availability: availability);
     return rows;
   }
 
   Future<CompanyJobLifecycle> verifyLifecycleSyncRecord(
     String operationId,
-    OwnerSession owner,
-  ) async {
-    final rows = await lifecycleSyncHoldings(ownerSession: owner);
+    CompanySession owner, {
+    CompanyJobSyncAvailability? availability,
+  }) async {
+    final rows = await lifecycleSyncHoldings(
+      ownerSession: owner,
+      availability: availability,
+    );
     final matches = rows.where((r) => r.operationCommitment == operationId);
     if (matches.length != 1) {
       throw const JobLineRefusal('Lifecycle sync record outside current scope');
@@ -1145,7 +1150,7 @@ extension CompanyJobLifecycleCommands on CompanyJobCommands {
 
   Future<String> applyIncomingLifecycle(
     Uint8List bytes, {
-    required OwnerSession ownerSession,
+    required CompanySession ownerSession,
     required CompanyJobSyncAvailability availability,
   }) async {
     if (_db.hasCallerTransaction) {
@@ -1154,7 +1159,7 @@ extension CompanyJobLifecycleCommands on CompanyJobCommands {
       );
     }
     final op = _LifecycleOperation.parse(Uint8List.fromList(bytes));
-    return ownerSession.runLocalCommand(() async {
+    return availability.run(() async {
       if (!identical(availability.enrollment, enrollment) ||
           !identical(availability.owner, ownerSession)) {
         throw const JobLineRefusal(
@@ -1162,7 +1167,7 @@ extension CompanyJobLifecycleCommands on CompanyJobCommands {
         );
       }
       await availability.requireCurrent();
-      await requireSyncPermission(ownerSession);
+      await requireSyncPermission(ownerSession, availability: availability);
       final context = await availability.peer.prepareCreateCommand(
         ownerSession,
       );

@@ -383,6 +383,7 @@ void main() {
         raw.execute('DROP TABLE warehouse_locations');
         raw.execute('DROP TABLE company_user_events');
         raw.execute('DROP TABLE company_user_deliveries');
+        raw.execute('DROP TABLE company_user_credential_grants');
         raw.execute('PRAGMA user_version = 8');
         raw.dispose();
         f.db = AppDatabase.forTesting(

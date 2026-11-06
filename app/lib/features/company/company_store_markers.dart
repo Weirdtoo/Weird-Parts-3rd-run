@@ -27,7 +27,17 @@ const companyMarkerTables = [
   'company_job_lifecycle_peer_acks',
   'company_user_events',
   'company_user_deliveries',
+  'company_user_credential_grants',
 ];
+
+const companyCredentialGrantTableColumns = <String, Set<String>>{
+  'company_user_credential_grants': {
+    'company_id',
+    'user_id',
+    'grant_key',
+    'grant_bytes',
+  },
+};
 
 const companyUserTableColumns = <String, Set<String>>{
   'company_user_events': {
@@ -180,6 +190,7 @@ Future<void> requireCompanyJoinSchema(AppDatabase db) async {
     if (version >= 10) ...companyDetailsTableColumns,
     if (version >= 11) ...companyLifecycleTableColumns,
     if (version >= 13) ...companyUserTableColumns,
+    if (version >= 14) ...companyCredentialGrantTableColumns,
   };
   for (final table in expected.keys) {
     final columns = await db.customSelect('PRAGMA table_info("$table")').get();

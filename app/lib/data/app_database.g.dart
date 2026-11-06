@@ -18723,6 +18723,337 @@ class CompanyUserDeliveriesCompanion
   }
 }
 
+class $CompanyUserCredentialGrantsTable extends CompanyUserCredentialGrants
+    with
+        TableInfo<
+          $CompanyUserCredentialGrantsTable,
+          CompanyUserCredentialGrant
+        > {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CompanyUserCredentialGrantsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _companyIdMeta = const VerificationMeta(
+    'companyId',
+  );
+  @override
+  late final GeneratedColumn<String> companyId = GeneratedColumn<String>(
+    'company_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _userIdMeta = const VerificationMeta('userId');
+  @override
+  late final GeneratedColumn<String> userId = GeneratedColumn<String>(
+    'user_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _grantKeyMeta = const VerificationMeta(
+    'grantKey',
+  );
+  @override
+  late final GeneratedColumn<String> grantKey = GeneratedColumn<String>(
+    'grant_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _grantBytesMeta = const VerificationMeta(
+    'grantBytes',
+  );
+  @override
+  late final GeneratedColumn<String> grantBytes = GeneratedColumn<String>(
+    'grant_bytes',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    companyId,
+    userId,
+    grantKey,
+    grantBytes,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'company_user_credential_grants';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CompanyUserCredentialGrant> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('company_id')) {
+      context.handle(
+        _companyIdMeta,
+        companyId.isAcceptableOrUnknown(data['company_id']!, _companyIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_companyIdMeta);
+    }
+    if (data.containsKey('user_id')) {
+      context.handle(
+        _userIdMeta,
+        userId.isAcceptableOrUnknown(data['user_id']!, _userIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_userIdMeta);
+    }
+    if (data.containsKey('grant_key')) {
+      context.handle(
+        _grantKeyMeta,
+        grantKey.isAcceptableOrUnknown(data['grant_key']!, _grantKeyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_grantKeyMeta);
+    }
+    if (data.containsKey('grant_bytes')) {
+      context.handle(
+        _grantBytesMeta,
+        grantBytes.isAcceptableOrUnknown(data['grant_bytes']!, _grantBytesMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_grantBytesMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {companyId, userId, grantKey};
+  @override
+  CompanyUserCredentialGrant map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CompanyUserCredentialGrant(
+      companyId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}company_id'],
+      )!,
+      userId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}user_id'],
+      )!,
+      grantKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}grant_key'],
+      )!,
+      grantBytes: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}grant_bytes'],
+      )!,
+    );
+  }
+
+  @override
+  $CompanyUserCredentialGrantsTable createAlias(String alias) {
+    return $CompanyUserCredentialGrantsTable(attachedDatabase, alias);
+  }
+}
+
+class CompanyUserCredentialGrant extends DataClass
+    implements Insertable<CompanyUserCredentialGrant> {
+  final String companyId;
+  final String userId;
+  final String grantKey;
+  final String grantBytes;
+  const CompanyUserCredentialGrant({
+    required this.companyId,
+    required this.userId,
+    required this.grantKey,
+    required this.grantBytes,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['company_id'] = Variable<String>(companyId);
+    map['user_id'] = Variable<String>(userId);
+    map['grant_key'] = Variable<String>(grantKey);
+    map['grant_bytes'] = Variable<String>(grantBytes);
+    return map;
+  }
+
+  CompanyUserCredentialGrantsCompanion toCompanion(bool nullToAbsent) {
+    return CompanyUserCredentialGrantsCompanion(
+      companyId: Value(companyId),
+      userId: Value(userId),
+      grantKey: Value(grantKey),
+      grantBytes: Value(grantBytes),
+    );
+  }
+
+  factory CompanyUserCredentialGrant.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CompanyUserCredentialGrant(
+      companyId: serializer.fromJson<String>(json['companyId']),
+      userId: serializer.fromJson<String>(json['userId']),
+      grantKey: serializer.fromJson<String>(json['grantKey']),
+      grantBytes: serializer.fromJson<String>(json['grantBytes']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'companyId': serializer.toJson<String>(companyId),
+      'userId': serializer.toJson<String>(userId),
+      'grantKey': serializer.toJson<String>(grantKey),
+      'grantBytes': serializer.toJson<String>(grantBytes),
+    };
+  }
+
+  CompanyUserCredentialGrant copyWith({
+    String? companyId,
+    String? userId,
+    String? grantKey,
+    String? grantBytes,
+  }) => CompanyUserCredentialGrant(
+    companyId: companyId ?? this.companyId,
+    userId: userId ?? this.userId,
+    grantKey: grantKey ?? this.grantKey,
+    grantBytes: grantBytes ?? this.grantBytes,
+  );
+  CompanyUserCredentialGrant copyWithCompanion(
+    CompanyUserCredentialGrantsCompanion data,
+  ) {
+    return CompanyUserCredentialGrant(
+      companyId: data.companyId.present ? data.companyId.value : this.companyId,
+      userId: data.userId.present ? data.userId.value : this.userId,
+      grantKey: data.grantKey.present ? data.grantKey.value : this.grantKey,
+      grantBytes: data.grantBytes.present
+          ? data.grantBytes.value
+          : this.grantBytes,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CompanyUserCredentialGrant(')
+          ..write('companyId: $companyId, ')
+          ..write('userId: $userId, ')
+          ..write('grantKey: $grantKey, ')
+          ..write('grantBytes: $grantBytes')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(companyId, userId, grantKey, grantBytes);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CompanyUserCredentialGrant &&
+          other.companyId == this.companyId &&
+          other.userId == this.userId &&
+          other.grantKey == this.grantKey &&
+          other.grantBytes == this.grantBytes);
+}
+
+class CompanyUserCredentialGrantsCompanion
+    extends UpdateCompanion<CompanyUserCredentialGrant> {
+  final Value<String> companyId;
+  final Value<String> userId;
+  final Value<String> grantKey;
+  final Value<String> grantBytes;
+  final Value<int> rowid;
+  const CompanyUserCredentialGrantsCompanion({
+    this.companyId = const Value.absent(),
+    this.userId = const Value.absent(),
+    this.grantKey = const Value.absent(),
+    this.grantBytes = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CompanyUserCredentialGrantsCompanion.insert({
+    required String companyId,
+    required String userId,
+    required String grantKey,
+    required String grantBytes,
+    this.rowid = const Value.absent(),
+  }) : companyId = Value(companyId),
+       userId = Value(userId),
+       grantKey = Value(grantKey),
+       grantBytes = Value(grantBytes);
+  static Insertable<CompanyUserCredentialGrant> custom({
+    Expression<String>? companyId,
+    Expression<String>? userId,
+    Expression<String>? grantKey,
+    Expression<String>? grantBytes,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (companyId != null) 'company_id': companyId,
+      if (userId != null) 'user_id': userId,
+      if (grantKey != null) 'grant_key': grantKey,
+      if (grantBytes != null) 'grant_bytes': grantBytes,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CompanyUserCredentialGrantsCompanion copyWith({
+    Value<String>? companyId,
+    Value<String>? userId,
+    Value<String>? grantKey,
+    Value<String>? grantBytes,
+    Value<int>? rowid,
+  }) {
+    return CompanyUserCredentialGrantsCompanion(
+      companyId: companyId ?? this.companyId,
+      userId: userId ?? this.userId,
+      grantKey: grantKey ?? this.grantKey,
+      grantBytes: grantBytes ?? this.grantBytes,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (companyId.present) {
+      map['company_id'] = Variable<String>(companyId.value);
+    }
+    if (userId.present) {
+      map['user_id'] = Variable<String>(userId.value);
+    }
+    if (grantKey.present) {
+      map['grant_key'] = Variable<String>(grantKey.value);
+    }
+    if (grantBytes.present) {
+      map['grant_bytes'] = Variable<String>(grantBytes.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CompanyUserCredentialGrantsCompanion(')
+          ..write('companyId: $companyId, ')
+          ..write('userId: $userId, ')
+          ..write('grantKey: $grantKey, ')
+          ..write('grantBytes: $grantBytes, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $WarehouseLocationsTable extends WarehouseLocations
     with TableInfo<$WarehouseLocationsTable, WarehouseLocation> {
   @override
@@ -19975,6 +20306,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $CompanyUserEventsTable(this);
   late final $CompanyUserDeliveriesTable companyUserDeliveries =
       $CompanyUserDeliveriesTable(this);
+  late final $CompanyUserCredentialGrantsTable companyUserCredentialGrants =
+      $CompanyUserCredentialGrantsTable(this);
   late final $WarehouseLocationsTable warehouseLocations =
       $WarehouseLocationsTable(this);
   late final $WarehouseCountsTable warehouseCounts = $WarehouseCountsTable(
@@ -20025,6 +20358,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     companyJoinEvents,
     companyUserEvents,
     companyUserDeliveries,
+    companyUserCredentialGrants,
     warehouseLocations,
     warehouseCounts,
   ];
@@ -20294,11 +20628,12 @@ class $$AppSettingsTableTableManager
               $$AppSettingsTableOrderingComposer($db: db, $table: table),
           createComputedFieldComposer: () =>
               $$AppSettingsTableAnnotationComposer($db: db, $table: table),
-          updateCompanionCallback: ({
-            Value<String> key = const Value.absent(),
-            Value<String> value = const Value.absent(),
-            Value<int> rowid = const Value.absent(),
-          }) => AppSettingsCompanion(key: key, value: value, rowid: rowid),
+          updateCompanionCallback:
+              ({
+                Value<String> key = const Value.absent(),
+                Value<String> value = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AppSettingsCompanion(key: key, value: value, rowid: rowid),
           createCompanionCallback:
               ({
                 required String key,
@@ -20334,26 +20669,28 @@ typedef $$AppSettingsTableProcessedTableManager =
       AppSetting,
       PrefetchHooks Function()
     >;
-typedef $$CategoriesTableCreateCompanionBuilder = CategoriesCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String name,
-  Value<int> rowid,
-});
-typedef $$CategoriesTableUpdateCompanionBuilder = CategoriesCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> name,
-  Value<int> rowid,
-});
+typedef $$CategoriesTableCreateCompanionBuilder =
+    CategoriesCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String name,
+      Value<int> rowid,
+    });
+typedef $$CategoriesTableUpdateCompanionBuilder =
+    CategoriesCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> name,
+      Value<int> rowid,
+    });
 
 class $$CategoriesTableFilterComposer
     extends Composer<_$AppDatabase, $CategoriesTable> {
@@ -20568,28 +20905,30 @@ typedef $$CategoriesTableProcessedTableManager =
       Category,
       PrefetchHooks Function()
     >;
-typedef $$StylesTableCreateCompanionBuilder = StylesCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String categoryId,
-  required String name,
-  Value<int> rowid,
-});
-typedef $$StylesTableUpdateCompanionBuilder = StylesCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> categoryId,
-  Value<String> name,
-  Value<int> rowid,
-});
+typedef $$StylesTableCreateCompanionBuilder =
+    StylesCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String categoryId,
+      required String name,
+      Value<int> rowid,
+    });
+typedef $$StylesTableUpdateCompanionBuilder =
+    StylesCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> categoryId,
+      Value<String> name,
+      Value<int> rowid,
+    });
 
 class $$StylesTableFilterComposer
     extends Composer<_$AppDatabase, $StylesTable> {
@@ -20823,28 +21162,30 @@ typedef $$StylesTableProcessedTableManager =
       Style,
       PrefetchHooks Function()
     >;
-typedef $$TypesTableCreateCompanionBuilder = TypesCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String styleId,
-  required String name,
-  Value<int> rowid,
-});
-typedef $$TypesTableUpdateCompanionBuilder = TypesCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> styleId,
-  Value<String> name,
-  Value<int> rowid,
-});
+typedef $$TypesTableCreateCompanionBuilder =
+    TypesCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String styleId,
+      required String name,
+      Value<int> rowid,
+    });
+typedef $$TypesTableUpdateCompanionBuilder =
+    TypesCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> styleId,
+      Value<String> name,
+      Value<int> rowid,
+    });
 
 class $$TypesTableFilterComposer extends Composer<_$AppDatabase, $TypesTable> {
   $$TypesTableFilterComposer({
@@ -21075,26 +21416,28 @@ typedef $$TypesTableProcessedTableManager =
       Type,
       PrefetchHooks Function()
     >;
-typedef $$DevicesTableCreateCompanionBuilder = DevicesCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String name,
-  Value<int> rowid,
-});
-typedef $$DevicesTableUpdateCompanionBuilder = DevicesCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> name,
-  Value<int> rowid,
-});
+typedef $$DevicesTableCreateCompanionBuilder =
+    DevicesCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String name,
+      Value<int> rowid,
+    });
+typedef $$DevicesTableUpdateCompanionBuilder =
+    DevicesCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> name,
+      Value<int> rowid,
+    });
 
 class $$DevicesTableFilterComposer
     extends Composer<_$AppDatabase, $DevicesTable> {
@@ -21309,26 +21652,28 @@ typedef $$DevicesTableProcessedTableManager =
       Device,
       PrefetchHooks Function()
     >;
-typedef $$BrandsTableCreateCompanionBuilder = BrandsCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String name,
-  Value<int> rowid,
-});
-typedef $$BrandsTableUpdateCompanionBuilder = BrandsCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> name,
-  Value<int> rowid,
-});
+typedef $$BrandsTableCreateCompanionBuilder =
+    BrandsCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String name,
+      Value<int> rowid,
+    });
+typedef $$BrandsTableUpdateCompanionBuilder =
+    BrandsCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> name,
+      Value<int> rowid,
+    });
 
 class $$BrandsTableFilterComposer
     extends Composer<_$AppDatabase, $BrandsTable> {
@@ -21543,26 +21888,28 @@ typedef $$BrandsTableProcessedTableManager =
       Brand,
       PrefetchHooks Function()
     >;
-typedef $$SuppliersTableCreateCompanionBuilder = SuppliersCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String name,
-  Value<int> rowid,
-});
-typedef $$SuppliersTableUpdateCompanionBuilder = SuppliersCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> name,
-  Value<int> rowid,
-});
+typedef $$SuppliersTableCreateCompanionBuilder =
+    SuppliersCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String name,
+      Value<int> rowid,
+    });
+typedef $$SuppliersTableUpdateCompanionBuilder =
+    SuppliersCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> name,
+      Value<int> rowid,
+    });
 
 class $$SuppliersTableFilterComposer
     extends Composer<_$AppDatabase, $SuppliersTable> {
@@ -21777,46 +22124,48 @@ typedef $$SuppliersTableProcessedTableManager =
       Supplier,
       PrefetchHooks Function()
     >;
-typedef $$PartsTableCreateCompanionBuilder = PartsCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String name,
-  Value<String> description,
-  Value<String?> categoryId,
-  Value<String?> styleId,
-  Value<String?> typeId,
-  Value<String> uom,
-  Value<String> specs,
-  Value<String> keywords,
-  Value<String?> photoPath,
-  Value<bool> active,
-  Value<String?> defaultSupplierId,
-  Value<int> rowid,
-});
-typedef $$PartsTableUpdateCompanionBuilder = PartsCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> name,
-  Value<String> description,
-  Value<String?> categoryId,
-  Value<String?> styleId,
-  Value<String?> typeId,
-  Value<String> uom,
-  Value<String> specs,
-  Value<String> keywords,
-  Value<String?> photoPath,
-  Value<bool> active,
-  Value<String?> defaultSupplierId,
-  Value<int> rowid,
-});
+typedef $$PartsTableCreateCompanionBuilder =
+    PartsCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String name,
+      Value<String> description,
+      Value<String?> categoryId,
+      Value<String?> styleId,
+      Value<String?> typeId,
+      Value<String> uom,
+      Value<String> specs,
+      Value<String> keywords,
+      Value<String?> photoPath,
+      Value<bool> active,
+      Value<String?> defaultSupplierId,
+      Value<int> rowid,
+    });
+typedef $$PartsTableUpdateCompanionBuilder =
+    PartsCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> name,
+      Value<String> description,
+      Value<String?> categoryId,
+      Value<String?> styleId,
+      Value<String?> typeId,
+      Value<String> uom,
+      Value<String> specs,
+      Value<String> keywords,
+      Value<String?> photoPath,
+      Value<bool> active,
+      Value<String?> defaultSupplierId,
+      Value<int> rowid,
+    });
 
 class $$PartsTableFilterComposer extends Composer<_$AppDatabase, $PartsTable> {
   $$PartsTableFilterComposer({
@@ -23197,36 +23546,38 @@ typedef $$SupplierListingsTableProcessedTableManager =
       SupplierListing,
       PrefetchHooks Function()
     >;
-typedef $$JobsTableCreateCompanionBuilder = JobsCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String name,
-  Value<String?> customer,
-  Value<String?> location,
-  Value<String?> jobNumber,
-  Value<String> status,
-  Value<String?> notes,
-  Value<int> rowid,
-});
-typedef $$JobsTableUpdateCompanionBuilder = JobsCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> name,
-  Value<String?> customer,
-  Value<String?> location,
-  Value<String?> jobNumber,
-  Value<String> status,
-  Value<String?> notes,
-  Value<int> rowid,
-});
+typedef $$JobsTableCreateCompanionBuilder =
+    JobsCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String name,
+      Value<String?> customer,
+      Value<String?> location,
+      Value<String?> jobNumber,
+      Value<String> status,
+      Value<String?> notes,
+      Value<int> rowid,
+    });
+typedef $$JobsTableUpdateCompanionBuilder =
+    JobsCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> name,
+      Value<String?> customer,
+      Value<String?> location,
+      Value<String?> jobNumber,
+      Value<String> status,
+      Value<String?> notes,
+      Value<int> rowid,
+    });
 
 class $$JobsTableFilterComposer extends Composer<_$AppDatabase, $JobsTable> {
   $$JobsTableFilterComposer({
@@ -25938,42 +26289,44 @@ typedef $$CompanyJobDetailPeerAcksTableProcessedTableManager =
       CompanyJobDetailPeerAck,
       PrefetchHooks Function()
     >;
-typedef $$JobLinesTableCreateCompanionBuilder = JobLinesCompanion Function({
-  required String id,
-  required String originDeviceId,
-  required DateTime createdAt,
-  required DateTime modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  required String jobId,
-  Value<String?> partId,
-  Value<String?> customName,
-  Value<String?> customNotes,
-  Value<String?> brandVersionId,
-  required double neededQty,
-  Value<double> shopPullQty,
-  Value<String?> uom,
-  Value<String?> notes,
-  Value<int> rowid,
-});
-typedef $$JobLinesTableUpdateCompanionBuilder = JobLinesCompanion Function({
-  Value<String> id,
-  Value<String> originDeviceId,
-  Value<DateTime> createdAt,
-  Value<DateTime> modifiedAt,
-  Value<int> revision,
-  Value<DateTime?> deletedAt,
-  Value<String> jobId,
-  Value<String?> partId,
-  Value<String?> customName,
-  Value<String?> customNotes,
-  Value<String?> brandVersionId,
-  Value<double> neededQty,
-  Value<double> shopPullQty,
-  Value<String?> uom,
-  Value<String?> notes,
-  Value<int> rowid,
-});
+typedef $$JobLinesTableCreateCompanionBuilder =
+    JobLinesCompanion Function({
+      required String id,
+      required String originDeviceId,
+      required DateTime createdAt,
+      required DateTime modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      required String jobId,
+      Value<String?> partId,
+      Value<String?> customName,
+      Value<String?> customNotes,
+      Value<String?> brandVersionId,
+      required double neededQty,
+      Value<double> shopPullQty,
+      Value<String?> uom,
+      Value<String?> notes,
+      Value<int> rowid,
+    });
+typedef $$JobLinesTableUpdateCompanionBuilder =
+    JobLinesCompanion Function({
+      Value<String> id,
+      Value<String> originDeviceId,
+      Value<DateTime> createdAt,
+      Value<DateTime> modifiedAt,
+      Value<int> revision,
+      Value<DateTime?> deletedAt,
+      Value<String> jobId,
+      Value<String?> partId,
+      Value<String?> customName,
+      Value<String?> customNotes,
+      Value<String?> brandVersionId,
+      Value<double> neededQty,
+      Value<double> shopPullQty,
+      Value<String?> uom,
+      Value<String?> notes,
+      Value<int> rowid,
+    });
 
 class $$JobLinesTableFilterComposer
     extends Composer<_$AppDatabase, $JobLinesTable> {
@@ -29586,6 +29939,208 @@ typedef $$CompanyUserDeliveriesTableProcessedTableManager =
       CompanyUserDelivery,
       PrefetchHooks Function()
     >;
+typedef $$CompanyUserCredentialGrantsTableCreateCompanionBuilder =
+    CompanyUserCredentialGrantsCompanion Function({
+      required String companyId,
+      required String userId,
+      required String grantKey,
+      required String grantBytes,
+      Value<int> rowid,
+    });
+typedef $$CompanyUserCredentialGrantsTableUpdateCompanionBuilder =
+    CompanyUserCredentialGrantsCompanion Function({
+      Value<String> companyId,
+      Value<String> userId,
+      Value<String> grantKey,
+      Value<String> grantBytes,
+      Value<int> rowid,
+    });
+
+class $$CompanyUserCredentialGrantsTableFilterComposer
+    extends Composer<_$AppDatabase, $CompanyUserCredentialGrantsTable> {
+  $$CompanyUserCredentialGrantsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get companyId => $composableBuilder(
+    column: $table.companyId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get grantKey => $composableBuilder(
+    column: $table.grantKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get grantBytes => $composableBuilder(
+    column: $table.grantBytes,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$CompanyUserCredentialGrantsTableOrderingComposer
+    extends Composer<_$AppDatabase, $CompanyUserCredentialGrantsTable> {
+  $$CompanyUserCredentialGrantsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get companyId => $composableBuilder(
+    column: $table.companyId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get grantKey => $composableBuilder(
+    column: $table.grantKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get grantBytes => $composableBuilder(
+    column: $table.grantBytes,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$CompanyUserCredentialGrantsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $CompanyUserCredentialGrantsTable> {
+  $$CompanyUserCredentialGrantsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get companyId =>
+      $composableBuilder(column: $table.companyId, builder: (column) => column);
+
+  GeneratedColumn<String> get userId =>
+      $composableBuilder(column: $table.userId, builder: (column) => column);
+
+  GeneratedColumn<String> get grantKey =>
+      $composableBuilder(column: $table.grantKey, builder: (column) => column);
+
+  GeneratedColumn<String> get grantBytes => $composableBuilder(
+    column: $table.grantBytes,
+    builder: (column) => column,
+  );
+}
+
+class $$CompanyUserCredentialGrantsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $CompanyUserCredentialGrantsTable,
+          CompanyUserCredentialGrant,
+          $$CompanyUserCredentialGrantsTableFilterComposer,
+          $$CompanyUserCredentialGrantsTableOrderingComposer,
+          $$CompanyUserCredentialGrantsTableAnnotationComposer,
+          $$CompanyUserCredentialGrantsTableCreateCompanionBuilder,
+          $$CompanyUserCredentialGrantsTableUpdateCompanionBuilder,
+          (
+            CompanyUserCredentialGrant,
+            BaseReferences<
+              _$AppDatabase,
+              $CompanyUserCredentialGrantsTable,
+              CompanyUserCredentialGrant
+            >,
+          ),
+          CompanyUserCredentialGrant,
+          PrefetchHooks Function()
+        > {
+  $$CompanyUserCredentialGrantsTableTableManager(
+    _$AppDatabase db,
+    $CompanyUserCredentialGrantsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CompanyUserCredentialGrantsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$CompanyUserCredentialGrantsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$CompanyUserCredentialGrantsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> companyId = const Value.absent(),
+                Value<String> userId = const Value.absent(),
+                Value<String> grantKey = const Value.absent(),
+                Value<String> grantBytes = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CompanyUserCredentialGrantsCompanion(
+                companyId: companyId,
+                userId: userId,
+                grantKey: grantKey,
+                grantBytes: grantBytes,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String companyId,
+                required String userId,
+                required String grantKey,
+                required String grantBytes,
+                Value<int> rowid = const Value.absent(),
+              }) => CompanyUserCredentialGrantsCompanion.insert(
+                companyId: companyId,
+                userId: userId,
+                grantKey: grantKey,
+                grantBytes: grantBytes,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$CompanyUserCredentialGrantsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $CompanyUserCredentialGrantsTable,
+      CompanyUserCredentialGrant,
+      $$CompanyUserCredentialGrantsTableFilterComposer,
+      $$CompanyUserCredentialGrantsTableOrderingComposer,
+      $$CompanyUserCredentialGrantsTableAnnotationComposer,
+      $$CompanyUserCredentialGrantsTableCreateCompanionBuilder,
+      $$CompanyUserCredentialGrantsTableUpdateCompanionBuilder,
+      (
+        CompanyUserCredentialGrant,
+        BaseReferences<
+          _$AppDatabase,
+          $CompanyUserCredentialGrantsTable,
+          CompanyUserCredentialGrant
+        >,
+      ),
+      CompanyUserCredentialGrant,
+      PrefetchHooks Function()
+    >;
 typedef $$WarehouseLocationsTableCreateCompanionBuilder =
     WarehouseLocationsCompanion Function({
       required String id,
@@ -30282,6 +30837,12 @@ class $AppDatabaseManager {
       $$CompanyUserEventsTableTableManager(_db, _db.companyUserEvents);
   $$CompanyUserDeliveriesTableTableManager get companyUserDeliveries =>
       $$CompanyUserDeliveriesTableTableManager(_db, _db.companyUserDeliveries);
+  $$CompanyUserCredentialGrantsTableTableManager
+  get companyUserCredentialGrants =>
+      $$CompanyUserCredentialGrantsTableTableManager(
+        _db,
+        _db.companyUserCredentialGrants,
+      );
   $$WarehouseLocationsTableTableManager get warehouseLocations =>
       $$WarehouseLocationsTableTableManager(_db, _db.warehouseLocations);
   $$WarehouseCountsTableTableManager get warehouseCounts =>

@@ -227,7 +227,7 @@ final class _IncomingCreateAdmission extends VerifiedCompanyReceiptAdmission {
 extension CompanyJobSyncCommands on CompanyJobCommands {
   Future<String> applyIncomingCreate(
     Uint8List canonicalOperation, {
-    required OwnerSession ownerSession,
+    required CompanySession ownerSession,
     required CompanyJobSyncAvailability availability,
   }) async {
     final result = await applyIncomingCreateOutcome(
@@ -245,7 +245,7 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
 
   Future<IncomingCreateJobOutcome> applyIncomingCreateOutcome(
     Uint8List canonicalOperation, {
-    required OwnerSession ownerSession,
+    required CompanySession ownerSession,
     required CompanyJobSyncAvailability availability,
   }) async {
     if (_db.hasCallerTransaction) {
@@ -258,9 +258,9 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
     final operation = _CreateOperation.parse(
       Uint8List.fromList(canonicalOperation),
     );
-    return ownerSession.runLocalCommand(() async {
+    return availability.run(() async {
       await availability.requireCurrent();
-      await requireSyncPermission(ownerSession);
+      await requireSyncPermission(ownerSession, availability: availability);
       final context = await availability.peer.prepareCreateCommand(
         ownerSession,
       );
@@ -344,8 +344,12 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
     });
   }
 
-  Future<CompanyJob> verifySyncRecord(String jobId, OwnerSession owner) async {
-    await requireSyncPermission(owner);
+  Future<CompanyJob> verifySyncRecord(
+    String jobId,
+    CompanySession owner, {
+    CompanyJobSyncAvailability? availability,
+  }) async {
+    await requireSyncPermission(owner, availability: availability);
     final row = await (_db.select(
       _db.companyJobs,
     )..where((t) => t.jobId.equals(jobId))).getSingle();
@@ -358,11 +362,24 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
     } else {
       await verifyIncomingRecord(row);
     }
-    await requireSyncPermission(owner);
+    await requireSyncPermission(owner, availability: availability);
     return row;
   }
 
-  Future<void> requireSyncPermission(CompanySession owner) async {
+  Future<void> requireSyncPermission(
+    CompanySession owner, {
+    CompanyJobSyncAvailability? availability,
+  }) async {
+    if (availability != null) {
+      if (!identical(availability.enrollment, enrollment) ||
+          !identical(availability.owner, owner)) {
+        throw const JobLineRefusal(
+          'sync availability belongs to another session',
+        );
+      }
+      await availability.requireCurrent();
+      return;
+    }
     final scope = owner.identity;
     final session = await enrollment.issueCreateJobAssertion(
       CreateJob(
@@ -405,9 +422,10 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
   );
 
   Future<List<CompanyJob>> syncHoldings({
-    required OwnerSession ownerSession,
+    required CompanySession ownerSession,
+    CompanyJobSyncAvailability? availability,
   }) async {
-    await requireSyncPermission(ownerSession);
+    await requireSyncPermission(ownerSession, availability: availability);
     final scope = ownerSession.identity;
     final rows =
         await (_db.select(_db.companyJobs)
@@ -428,13 +446,13 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
         await verifyIncomingRecord(row);
       }
     }
-    await requireSyncPermission(ownerSession);
+    await requireSyncPermission(ownerSession, availability: availability);
     return rows;
   }
 
   Future<String> _applyActiveIncomingCreate(
     Uint8List canonicalOperation, {
-    required OwnerSession ownerSession,
+    required CompanySession ownerSession,
     required CompanyJobSyncAvailability availability,
   }) async {
     if (_db.hasCallerTransaction) {
@@ -443,7 +461,7 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
     final operation = _CreateOperation.parse(
       Uint8List.fromList(canonicalOperation),
     );
-    return ownerSession.runLocalCommand(() async {
+    {
       if (!identical(availability.enrollment, enrollment) ||
           !identical(availability.owner, ownerSession)) {
         throw const JobLineRefusal(
@@ -452,7 +470,7 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
       }
       await availability.requireCurrent();
       final peer = availability.peer;
-      await requireSyncPermission(ownerSession);
+      await requireSyncPermission(ownerSession, availability: availability);
       final context = await peer.prepareCreateCommand(ownerSession);
       await context.admitCreateActor(operation.authorization);
       context.validateAuthor(operation.body);
@@ -464,7 +482,7 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
             'UPDATE app_settings SET value = value WHERE key = ?',
             [kInstallationBindingKey],
           );
-          await requireSyncPermission(ownerSession);
+          await requireSyncPermission(ownerSession, availability: availability);
           await peer.requireCurrent();
           final verified =
               await CreateJobAuthorization(
@@ -635,6 +653,6 @@ extension CompanyJobSyncCommands on CompanyJobCommands {
       }
       await peer.requireCurrent();
       return result;
-    });
+    }
   }
 }

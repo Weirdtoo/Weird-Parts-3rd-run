@@ -12,10 +12,12 @@ class CompanyJobsPanel extends StatefulWidget {
   const CompanyJobsPanel({
     required this.commands,
     required this.owner,
+    this.onInitialLoadFinished,
     super.key,
   });
   final CompanyJobCommands commands;
   final CompanySession owner;
+  final VoidCallback? onInitialLoadFinished;
 
   @override
   State<CompanyJobsPanel> createState() => _CompanyJobsPanelState();
@@ -40,6 +42,7 @@ class _CompanyJobsPanelState extends State<CompanyJobsPanel> {
   bool _loading = true;
   bool _busy = false;
   bool _available = false;
+  bool _initialLoadNotified = false;
 
   @override
   void initState() {
@@ -144,6 +147,11 @@ class _CompanyJobsPanelState extends State<CompanyJobsPanel> {
             ? error.reason
             : 'Company Jobs are locked. Sign in again to verify authority.';
       });
+    } finally {
+      if (mounted && !_initialLoadNotified) {
+        _initialLoadNotified = true;
+        widget.onInitialLoadFinished?.call();
+      }
     }
   }
 

@@ -816,8 +816,9 @@ extension CompanyJobNameCommands on CompanyJobCommands {
 
   Future<List<CompanyJobName>> nameSyncHoldings({
     required CompanySession ownerSession,
+    CompanyJobSyncAvailability? availability,
   }) async {
-    await requireSyncPermission(ownerSession);
+    await requireSyncPermission(ownerSession, availability: availability);
     final scope = ownerSession.identity;
     final rows =
         await (_db.select(_db.companyJobNames)
@@ -835,15 +836,19 @@ extension CompanyJobNameCommands on CompanyJobCommands {
     for (final row in rows) {
       await _verifyNameRecord(row, verified: verified);
     }
-    await requireSyncPermission(ownerSession);
+    await requireSyncPermission(ownerSession, availability: availability);
     return rows;
   }
 
   Future<CompanyJobName> verifyNameSyncRecord(
     String operationId,
-    OwnerSession owner,
-  ) async {
-    final rows = await nameSyncHoldings(ownerSession: owner);
+    CompanySession owner, {
+    CompanyJobSyncAvailability? availability,
+  }) async {
+    final rows = await nameSyncHoldings(
+      ownerSession: owner,
+      availability: availability,
+    );
     final matches = rows.where((r) => r.operationCommitment == operationId);
     if (matches.length != 1) {
       throw const JobLineRefusal('Name sync record outside current scope');
@@ -923,14 +928,14 @@ extension CompanyJobNameCommands on CompanyJobCommands {
 
   Future<String> applyIncomingName(
     Uint8List bytes, {
-    required OwnerSession ownerSession,
+    required CompanySession ownerSession,
     required CompanyJobSyncAvailability availability,
   }) async {
     if (_db.hasCallerTransaction) {
       throw const JobLineRefusal('incoming name owns top-level transaction');
     }
     final op = _NameOperation.parse(Uint8List.fromList(bytes));
-    return ownerSession.runLocalCommand(() async {
+    return availability.run(() async {
       if (!identical(availability.enrollment, enrollment) ||
           !identical(availability.owner, ownerSession)) {
         throw const JobLineRefusal(
@@ -938,7 +943,7 @@ extension CompanyJobNameCommands on CompanyJobCommands {
         );
       }
       await availability.requireCurrent();
-      await requireSyncPermission(ownerSession);
+      await requireSyncPermission(ownerSession, availability: availability);
       final context = await availability.peer.prepareCreateCommand(
         ownerSession,
       );

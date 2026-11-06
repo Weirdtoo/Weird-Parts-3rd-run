@@ -26,7 +26,7 @@ Future<void> projectSeededSchema10NativeFixture(AppDatabase db) async {
       await db
           .customSelect("SELECT name FROM sqlite_master WHERE type = 'table'")
           .get(),
-      hasLength(38),
+      hasLength(39),
     );
     for (final table in db.allTables.where(
       (table) =>
@@ -47,6 +47,7 @@ Future<void> projectSeededSchema10NativeFixture(AppDatabase db) async {
     await db.customStatement('DROP TABLE warehouse_locations');
     await db.customStatement('DROP TABLE company_user_events');
     await db.customStatement('DROP TABLE company_user_deliveries');
+    await db.customStatement('DROP TABLE company_user_credential_grants');
     await db.customStatement('PRAGMA user_version = 10');
     expect(
       (await db.customSelect('PRAGMA user_version').getSingle())
