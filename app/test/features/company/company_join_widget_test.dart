@@ -330,7 +330,7 @@ void main() {
   }
 
   testWidgets(
-    'pre-send provisioning refusal releases selected user and manual availability',
+    'pre-send protected-read refusal releases selected user and manual availability',
     (tester) => HttpOverrides.runWithHttpOverrides(() async {
       late JoinFixture f;
       late NearbyController a;
@@ -419,24 +419,37 @@ void main() {
       var invitationMessages = 0;
       final receive = b.onJoinMessage!;
       b.onJoinMessage = (pair, wire) async {
-        if (wire['kind'] == 'user-provision-invite') invitationMessages++;
+        if (wire['kind'] == 'user-provision-invite' ||
+            wire['kind'] == 'user-initial-provision-probe@2') {
+          invitationMessages++;
+        }
         return receive(pair, wire);
       };
       await tester.ensureVisible(
         find.byKey(const Key('company-user-provision')),
       );
       debugPrint('pre-send-widget: provision-start');
-      await tester.runAsync(
-        () => tester.tap(find.byKey(const Key('company-user-provision'))),
-      );
+      var protectedReadRefused = false;
+      await tester.runAsync(() async {
+        f.aStore.onRead = (namespace) {
+          if (namespace == companyUserNamespace(f.a.namespace)) {
+            f.aStore.onRead = null;
+            protectedReadRefused = true;
+            throw const FileSystemException('Synthetic protected read refused');
+          }
+        };
+        await tester.tap(find.byKey(const Key('company-user-provision')));
+      });
       await joinWidgetSignal(
         tester,
         () => find
-            .textContaining('Use the compatible retained-peer Sync Now flow')
+            .textContaining('Protected user account unavailable')
             .evaluate()
             .isNotEmpty,
       );
       debugPrint('pre-send-widget: refusal-observed');
+      expect(protectedReadRefused, isTrue);
+      expect(f.aStore.onRead, isNull);
       expect(invitationMessages, 0);
       final selector = find.byKey(const Key('company-provision-user-selector'));
       expect(
