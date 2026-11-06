@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' show SemanticsRole;
@@ -901,12 +902,57 @@ void main() {
         find.byKey(const Key('company-signin-pin')),
         '0123',
       );
-      await tester.runAsync(
-        () async => tester.tap(find.byKey(const Key('company-signin'))),
+      final loadEntered = Completer<void>();
+      final releaseLoad = Completer<void>();
+      f.aStore.beforeRead = (namespace) {
+        if (namespace == f.a.namespace &&
+            find.byType(CompanyJobsPanel).evaluate().isNotEmpty &&
+            !loadEntered.isCompleted) {
+          loadEntered.complete();
+          return releaseLoad.future;
+        }
+        return null;
+      };
+      try {
+        await tester.runAsync(
+          () async => tester.tap(find.byKey(const Key('company-signin'))),
+        );
+        await _wait(tester, find.textContaining('Company ID:'));
+        await tester.runAsync(
+          () => loadEntered.future.timeout(const Duration(seconds: 10)),
+        );
+        expect(find.byKey(const Key('company-enroll-open')), findsNothing);
+        await tester.runAsync(
+          () async => tester.tap(find.byKey(const Key('company-peer-open'))),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          find.text('Verify retained company peer'),
+          findsNothing,
+          reason: 'A fast tap must not open the route while Jobs authority is loading',
+        );
+        final peerButton = tester.widget<OutlinedButton>(
+          find.byKey(const Key('company-peer-open')),
+        );
+        expect(
+          peerButton.onPressed,
+          isNull,
+          reason: 'Peer entry must wait for the first Jobs load to finish',
+        );
+      } finally {
+        f.aStore.beforeRead = null;
+        releaseLoad.complete();
+      }
+      await _wait(tester, find.byKey(const Key('company-job-name')));
+      final initialJobsPanelKey = tester
+          .widget<CompanyJobsPanel>(find.byType(CompanyJobsPanel))
+          .key;
+      expect(
+        tester
+            .widget<OutlinedButton>(find.byKey(const Key('company-peer-open')))
+            .onPressed,
+        isNotNull,
       );
-      await _wait(tester, find.textContaining('Company ID:'));
-      expect(find.byKey(const Key('company-enroll-open')), findsNothing);
-      expect(find.byKey(const Key('company-peer-open')), findsOneWidget);
       await tester.runAsync(
         () async => tester.tap(find.byKey(const Key('company-peer-open'))),
       );
@@ -924,7 +970,24 @@ void main() {
       }
       expect(find.byKey(const Key('company-join-busy')), findsNothing);
       await tester.runAsync(() async => tester.tap(find.byTooltip('Back')));
+      await tester.pumpAndSettle();
       await _wait(tester, find.text('Create Job permission only.'));
+      await _wait(
+        tester,
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is CompanyJobsPanel && widget.key != initialJobsPanelKey,
+        ),
+      );
+      await _wait(
+        tester,
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is OutlinedButton &&
+              widget.key == const Key('company-peer-open') &&
+              widget.onPressed != null,
+        ),
+      );
       await _wait(tester, find.byKey(const Key('company-job-name')));
       expect(find.textContaining('Company Jobs are locked'), findsNothing);
       expect(find.byKey(const Key('company-join-open')), findsNothing);
