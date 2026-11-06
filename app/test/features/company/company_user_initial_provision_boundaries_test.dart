@@ -310,8 +310,8 @@ void main() {
     final grantCount =
         (await f.aDb.select(f.aDb.companyUserCredentialGrants).get()).length;
     final original = Cryptography.instance;
+    expect(identical(original, DartCryptography.defaultInstance), isTrue);
     final observer = _PrivateExportObserver();
-    Cryptography.instance = observer;
     try {
       for (var batch = 0; batch < 32; batch++) {
         final peers = await initialProvisionPeers(f.aEnrollment, f.bEnrollment);
@@ -326,8 +326,12 @@ void main() {
               requestId: const Uuid().v4(),
             );
             expect(bundle.keys, containsAll(['box', 'issuance']));
-            expect(observer.privateSignatures, batch * 4 + offset + 1);
           }
+          expect(
+            (await f.aDb.select(f.aDb.companyUserCredentialGrants).get())
+                .length,
+            grantCount + (batch + 1) * 4,
+          );
         } finally {
           await peers.ac.dispose();
           await peers.bc.dispose();
@@ -337,6 +341,7 @@ void main() {
         (await f.aDb.select(f.aDb.companyUserCredentialGrants).get()).length,
         grantCount + 128,
       );
+      Cryptography.instance = observer;
       final peers = await initialProvisionPeers(f.aEnrollment, f.bEnrollment);
       try {
         final sourceSql = await sqlSnapshot(f.aDb);
@@ -360,7 +365,7 @@ void main() {
             ),
           ),
         );
-        expect(observer.privateSignatures, 128);
+        expect(observer.privateSignatures, 0);
         expect(await sqlSnapshot(f.aDb), sourceSql);
         expect(protectedUnchanged(f.aStore, sourceProtected), isTrue);
         expect(await sqlSnapshot(f.bDb), recipientSql);
