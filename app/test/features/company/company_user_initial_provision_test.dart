@@ -539,8 +539,9 @@ void main() {
         peers.b,
       );
       c.store.beforeRead = (name) {
-        if (interrupted || name != namespace || c.db.hasCallerTransaction)
+        if (interrupted || name != namespace || c.db.hasCallerTransaction) {
           return null;
+        }
         return (() async {
           final rows = await c.db
               .select(c.db.companyUserCredentialGrants)
@@ -700,8 +701,9 @@ void main() {
         peers.b,
       );
       c.store.beforeRead = (name) {
-        if (intercepted || name != namespace || c.db.hasCallerTransaction)
+        if (intercepted || name != namespace || c.db.hasCallerTransaction) {
           return null;
+        }
         return (() async {
           final rows = await c.db
               .select(c.db.companyUserCredentialGrants)
