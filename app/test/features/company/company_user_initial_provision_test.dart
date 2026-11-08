@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:drift/native.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:cryptography/dart.dart';
+import 'package:flutter/foundation.dart' show debugPrintSynchronously;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:uuid/uuid.dart';
 import 'package:wired_parts/data/app_database.dart';
@@ -20,6 +21,7 @@ import 'company_join_test.dart'
         joinChannels,
         sqlSnapshot;
 import 'company_created_job_sync_test.dart' show syncAttackWire;
+import 'company_users_test.dart' show readSyncFrame;
 
 String initialTestCanonical(Object? value) {
   Object? sort(Object? v) => v is Map
@@ -1364,6 +1366,250 @@ void main() {
     await c.enrollment.signInUser(b.userId, '5678');
     await f.bEnrollment.signInUser(b.userId, '5678');
   }, timeout: const Timeout(Duration(minutes: 5)));
+  test('selected A delivers B5 through full retained sync after B-before-A initial provisioning', () async {
+    debugPrintSynchronously('B5 fixture setup started');
+    final f = await JoinFixture.create();
+    await activateFixtureB(f);
+    await f.bEnrollment.signIn('1234');
+    final a = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'First builder',
+      pin: '0123',
+    );
+    final b = await f.aEnrollment.createRestrictedUser(
+      owner: f.owner,
+      requestId: const Uuid().v4(),
+      name: 'Second builder',
+      pin: '1235',
+    );
+    for (final userId in [a.userId, b.userId]) {
+      await provisionInitialUser(f.aEnrollment, f.bEnrollment, userId);
+    }
+    for (final (version, pin) in [(1, '2345'), (2, '3456'), (3, '4567')]) {
+      await f.aEnrollment.resetRestrictedUserPin(
+        owner: f.owner,
+        userId: b.userId,
+        requestId: const Uuid().v4(),
+        expectedCredentialVersion: version,
+        pin: pin,
+      );
+    }
+    await transferCurrentUser(f.aEnrollment, f.bEnrollment, b.userId);
+    debugPrintSynchronously('B5 fixture D1 B4 ready');
+    final c = await thirdInstallation(f);
+    debugPrintSynchronously('B5 fixture C enrolled');
+    for (final userId in [b.userId, a.userId]) {
+      await provisionInitialUser(
+        f.aEnrollment,
+        c.enrollment,
+        userId,
+        requestId: const Uuid().v4(),
+      );
+      debugPrintSynchronously(
+        userId == b.userId
+            ? 'B5 fixture C B4 installed'
+            : 'B5 fixture C A1 installed',
+      );
+    }
+    expect(
+      (await c.enrollment.userLifecycleStatus(userId: b.userId))!
+          .credentialVersion,
+      4,
+    );
+    expect(
+      (await c.enrollment.signInUser(b.userId, '4567')).identity.userId,
+      b.userId,
+    );
+    final selectedC = await c.enrollment.signInUser(a.userId, '0123');
+    final aNamespace = companyUserNamespace(c.installation.namespace, slot: 2);
+    final aBefore = c.store.states[aNamespace]!;
+    final d1Sql = initialTestCanonical(await sqlSnapshot(f.bDb));
+    final d1Protected = Map.of(f.bStore.states);
+    final b5Request = const Uuid().v4();
+    final reset = await f.aEnrollment.resetRestrictedUserPin(
+      owner: f.owner,
+      userId: b.userId,
+      requestId: b5Request,
+      expectedCredentialVersion: 4,
+      pin: '5678',
+    );
+    expect(reset.credentialVersion, 5);
+    debugPrintSynchronously('B5 fixture Root reset saved');
+    final selectedRoot = await f.aEnrollment.signInUser(a.userId, '0123');
+    debugPrintSynchronously('B5 fixture A selected on both peers');
+    final peers = await initialProvisionPeers(f.aEnrollment, c.enrollment);
+    debugPrintSynchronously('B5 fixture retained membership verified');
+    final sender = CompanyCreatedJobSync(
+      availability: await CompanyJobSyncAvailability.open(
+        enrollment: f.aEnrollment,
+        owner: selectedRoot,
+        peer: peers.a,
+      ),
+      controller: peers.ac,
+    );
+    addTearDown(sender.closeAndDrain);
+    CreatedJobSyncResult? receiverTerminal;
+    final receiver = CompanyCreatedJobSync(
+      availability: await CompanyJobSyncAvailability.open(
+        enrollment: c.enrollment,
+        owner: selectedC,
+        peer: peers.b,
+      ),
+      controller: peers.bc,
+      onDiagnostic: (diagnostic) {
+        if (diagnostic.kind == CreatedJobSyncDiagnosticKind.terminal) {
+          receiverTerminal = diagnostic.result;
+        }
+      },
+    );
+    addTearDown(receiver.closeAndDrain);
+    final actions = <String>[];
+    final refusals = <String>[];
+    const safeRefusalMessages = {
+      'Unsupported or busy Job user profile',
+      'Company user roster exceeds capacity',
+      'Complete lifecycle capability negotiation first',
+      'Lifecycle user is outside the negotiated roster',
+      'Lifecycle target not verified',
+      'Persist user policy before its acknowledgment',
+      'Persist compatible user lifecycle state before inventory',
+      'Peer user checkpoint conflicts',
+      'Owner authorization required for private credential delivery',
+      'User policy changed',
+      'User policy changed before delivery',
+      'User changed during policy admission',
+      'Current user policy not installed',
+      'Private user issuance differs',
+      'User receipt peer differs',
+      'User delivery receipt collision',
+      'Protected user account unavailable',
+      'Retained peer context changed',
+    };
+    peers.ac.onJoinMessage = (_, wire) => sender.receive(wire);
+    peers.bc.onJoinMessage = (pair, wire) async {
+      var action = 'unreadable';
+      try {
+        action = (await readSyncFrame(pair, wire))['action'] as String;
+      } catch (_) {
+        // Let production handle the original frame even if observation fails.
+      }
+      actions.add(action);
+      debugPrintSynchronously('B5 receiver dispatch $action');
+      try {
+        return await receiver.receive(wire);
+      } catch (error) {
+        final category = CreatedJobSyncFailure.fromError(
+          error,
+          CreatedJobSyncStage.channelOpen,
+        ).reason;
+        final reason =
+            error is CompanyBootstrapRefusal &&
+                safeRefusalMessages.contains(error.message)
+            ? error.message
+            : category.name;
+        refusals.add('$action $reason');
+        debugPrintSynchronously('B5 receiver refusal $action $reason');
+        rethrow;
+      }
+    };
+    Future<CreatedJobSyncResult> sync(String phase) async {
+      actions.clear();
+      refusals.clear();
+      receiverTerminal = null;
+      debugPrintSynchronously('B5 fixture $phase SyncNow started');
+      final result = await sender.syncNow();
+      final trace =
+          'Actions ${actions.join(', ')}. '
+          'Sender ${result.failure?.message ?? 'no refusal'}. '
+          'Receiver ${receiverTerminal?.failure?.message ?? 'no refusal'}. '
+          'Callback ${refusals.join(', ')}.';
+      debugPrintSynchronously(trace);
+      expect(result.complete, isTrue, reason: trace);
+      expect(receiverTerminal?.complete, isTrue, reason: trace);
+      expect(actions.take(8), [
+        'profile',
+        'policyOffer',
+        'policy',
+        'policyAck',
+        'policyOffer',
+        'policy',
+        'policyAck',
+        'start',
+      ]);
+      expect(actions.last, 'finish');
+      expect(f.aEnrollment.currentCompanySession, same(selectedRoot));
+      expect(c.enrollment.currentCompanySession, same(selectedC));
+      return result;
+    }
+
+    await sync('first');
+    final installed = (await c.enrollment.userLifecycleStatus(
+      userId: b.userId,
+    ))!;
+    expect(installed.credentialVersion, 5);
+    expect(installed.awaitingCredential, isFalse);
+    final b5Event = (await f.aDb.select(f.aDb.companyUserEvents).get())
+        .singleWhere(
+          (row) => row.userId == b.userId && row.requestId == b5Request,
+        );
+    final cEvents = await c.db.select(c.db.companyUserEvents).get();
+    final cDeliveries = await c.db.select(c.db.companyUserDeliveries).get();
+    final rootDeliveries = await f.aDb
+        .select(f.aDb.companyUserDeliveries)
+        .get();
+    expect(cEvents.where((row) => row == b5Event), hasLength(1));
+    bool isForwardB5(CompanyUserDelivery row) =>
+        row.userId == b.userId &&
+        row.publicHead == b5Event.publicHead &&
+        row.sourceDeviceId == selectedRoot.identity.deviceId &&
+        row.peerDeviceId == selectedC.identity.deviceId;
+    final cReceipt = cDeliveries.singleWhere(isForwardB5);
+    final rootReceipt = rootDeliveries.singleWhere(isForwardB5);
+    expect(rootReceipt.receiptBytes == cReceipt.receiptBytes, isTrue);
+    final body = (jsonDecode(cReceipt.receiptBytes) as Map)['body'] as Map;
+    expect(body['kind'], 'company.user.state.receipt@1');
+    expect(body['request'] == b5Request, isTrue);
+    expect(
+      (body['recipient'] as List)[4] ==
+          c.installation.receivingStoreGeneration!.value,
+      isTrue,
+    );
+
+    debugPrintSynchronously('B5 fixture forward receipt verified');
+    final repeat = await sync('repeat');
+    expect((repeat.sent, repeat.received), (0, 0));
+    expect(
+      (await c.db.select(c.db.companyUserEvents).get()).length,
+      cEvents.length,
+    );
+    expect(
+      (await c.db.select(c.db.companyUserDeliveries).get()).length,
+      cDeliveries.length,
+    );
+    expect(
+      (await f.aDb.select(f.aDb.companyUserDeliveries).get()).length,
+      rootDeliveries.length,
+    );
+    await expectLater(
+      c.enrollment.signInUser(b.userId, '4567'),
+      throwsA(isA<CompanyBootstrapRefusal>()),
+    );
+    expect(
+      (await c.enrollment.userLifecycleStatus(userId: b.userId))!
+          .attemptsRemaining,
+      installed.attemptsRemaining - 1,
+    );
+    expect(
+      (await c.enrollment.signInUser(b.userId, '5678')).identity.userId,
+      b.userId,
+    );
+    expect(protectedBytesEqual(c.store.states[aNamespace]!, aBefore), isTrue);
+    expect(c.store.states[aNamespace]!.revision, aBefore.revision);
+    expect(initialTestCanonical(await sqlSnapshot(f.bDb)) == d1Sql, isTrue);
+    expect(protectedUnchanged(f.bStore, d1Protected), isTrue);
+  }, timeout: const Timeout(Duration(minutes: 7)));
+
   test('an existing credential-one user reaches a third installation without reset', () async {
     final f = await JoinFixture.create();
     await activateFixtureB(f);
