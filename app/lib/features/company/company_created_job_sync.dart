@@ -1,22 +1,27 @@
 part of '../installation/installation_security.dart';
 
-final class CompanyJobSyncAvailability implements NearbyCompanyDisclosure {
+final class CompanyJobSyncAvailability
+    implements NearbyCompanyPeerRosterDisclosure {
   CompanyJobSyncAvailability._(
     this.enrollment,
     this.owner,
     this.peer,
     this._permit,
+    this.peerRosterConsent,
   );
   final CompanyEnrollment enrollment;
   final CompanySession owner;
   final VerifiedPeerMembership peer;
   final DeviceSyncPermit _permit;
+  @override
+  final bool peerRosterConsent;
   bool _open = true;
 
   static Future<CompanyJobSyncAvailability> open({
     required CompanyEnrollment enrollment,
     required CompanySession owner,
     required VerifiedPeerMembership peer,
+    bool peerRosterConsent = false,
   }) async {
     final permit = await enrollment.deviceSyncPermit();
     if (!identical(permit._session, owner)) {
@@ -27,6 +32,7 @@ final class CompanyJobSyncAvailability implements NearbyCompanyDisclosure {
       owner,
       peer,
       permit,
+      peerRosterConsent,
     );
     await result.requireCurrent();
     return result;
@@ -631,6 +637,7 @@ final class CreatedJobSyncResult {
     this.unsupported, {
     this.failure,
     this.held = 0,
+    this.peerRosterMore = false,
   });
   final int sent;
   final int received;
@@ -638,13 +645,19 @@ final class CreatedJobSyncResult {
   final int unsupported;
   final CreatedJobSyncFailure? failure;
   final int held;
-  String get message => complete
-      ? 'Job snapshot synced. Sent $sent, received $received.'
-      : 'Job sync incomplete. Confirmed sent $sent, received $received. Pair again and retry Sync Now.${held > 0
-            ? ' User work is held for attention under the current account policy, with original bytes retained and no applied confirmation.'
-            : unsupported > 0
-            ? ' Unsupported author scope remains pending.'
-            : ''}${failure == null ? '' : ' ${failure!.message}'}';
+  final bool peerRosterMore;
+
+  String get message {
+    final jobs = complete
+        ? 'Job snapshot synced. Sent $sent, received $received.'
+        : 'Job sync incomplete. Confirmed sent $sent, received $received. Pair again and retry Sync Now.${held > 0
+              ? ' User work is held for attention under the current account policy, with original bytes retained and no applied confirmation.'
+              : unsupported > 0
+              ? ' Unsupported author scope remains pending.'
+              : ''}${failure == null ? '' : ' ${failure!.message}'}';
+    if (!peerRosterMore) return jobs;
+    return '$jobs More approved company peers are available. Sync Now again.';
+  }
 }
 
 enum _CreatedJobRunDirection { initiating, receiving }
@@ -658,6 +671,7 @@ final class _CreatedJobRun {
 
 final class CompanyCreatedJobSync {
   String? _lifecycleProfileRun;
+  var _peerRosterReceive = _PeerRosterReceive();
   String? _lifecyclePolicyRun;
   String? _lifecycleReadyRun;
   bool _lifecycleMore = false;
@@ -1016,8 +1030,9 @@ final class CompanyCreatedJobSync {
 
   Future<Map<String, Object?>> _rpc(
     String action,
-    Map<String, Object?> data,
-  ) async {
+    Map<String, Object?> data, {
+    Future<void> Function()? beforeSend,
+  }) async {
     final run = _activeRun;
     if (run == null || run.direction != _CreatedJobRunDirection.initiating) {
       throw const CompanyBootstrapRefusal('Job sync run differs');
@@ -1032,6 +1047,7 @@ final class CompanyCreatedJobSync {
       'run': run.id,
       'data': data,
     });
+    if (beforeSend != null) await beforeSend();
     _requireRun(run);
     run.disclosed = true;
     final response = await controller.exchangeCompanyMessage(
@@ -1437,7 +1453,8 @@ final class CompanyCreatedJobSync {
       if (data['profile'] != _syncActorProfile ||
           data['capacity'] is! int ||
           data['capacity'] != kCompanyUserCapacity ||
-          _activeRun != null) {
+          _activeRun != null ||
+          (_lifecycleProfileRun == body['run'] && _peerRosterReceive.started)) {
         throw const CompanyBootstrapRefusal(
           'Unsupported or busy Job user profile',
         );
@@ -1455,6 +1472,7 @@ final class CompanyCreatedJobSync {
       _lifecycleLocalUsers = localUsers.toSet();
       _lifecycleFinished.clear();
       _lifecycleProfileRun = body['run'] as String;
+      _peerRosterReceive = _PeerRosterReceive();
       _lifecycleReadyRun = users.isEmpty ? body['run'] as String : null;
       _lifecyclePolicyRun = null;
       _lifecycleTarget = null;
@@ -1469,10 +1487,49 @@ final class CompanyCreatedJobSync {
         },
       });
     }
+    if (action == 'peerRoster') {
+      if (_lifecycleProfileRun != body['run'] ||
+          _lifecycleTarget != null ||
+          _activeRun != null) {
+        throw const CompanyBootstrapRefusal(
+          'Peer roster exchange is out of order',
+        );
+      }
+      try {
+        final roster = await _CompanyPeerRoster.open(availability);
+        if (roster == null) {
+          throw const CompanyBootstrapRefusal(
+            'Peer roster exchange is unavailable',
+          );
+        }
+        final result = await _peerRosterReceive.receive(roster, body['data']);
+        final reply = await _seal(wire['request'] as String, {
+          'action': 'peerRoster.reply',
+          'run': body['run'],
+          'data': result,
+        });
+        final requestData = body['data'] as Map;
+        if (result.containsKey('certificates')) {
+          await roster.requireDisclosureCurrent();
+        } else if (requestData['operation'] == 'push') {
+          await roster.requirePageRetained(
+            Map<String, Object?>.from(requestData['page'] as Map),
+          );
+        } else {
+          await roster.requireCurrent();
+        }
+        return reply;
+      } catch (_) {
+        _peerRosterReceive.fail();
+        rethrow;
+      }
+    }
     if (action == 'policyOffer' ||
         action == 'policy' ||
         action == 'policyAck') {
-      if (_lifecycleProfileRun != body['run'] || _activeRun != null) {
+      if (_lifecycleProfileRun != body['run'] ||
+          _activeRun != null ||
+          _peerRosterReceive.unfinished) {
         throw const CompanyBootstrapRefusal(
           'Complete lifecycle capability negotiation first',
         );
@@ -1566,7 +1623,7 @@ final class CompanyCreatedJobSync {
     late _CreatedJobRun run;
     if (action == 'start') {
       await _requireUserRoster(_lifecycleLocalUsers);
-      if (_lifecycleReadyRun != body['run']) {
+      if (_lifecycleReadyRun != body['run'] || _peerRosterReceive.unfinished) {
         throw const CompanyBootstrapRefusal(
           'Persist compatible user lifecycle state before inventory',
         );
@@ -1964,6 +2021,73 @@ final class CompanyCreatedJobSync {
     throw const CompanyBootstrapRefusal('Unsupported Job sync action');
   }
 
+  Future<bool> _exchangePeerRoster() async {
+    if (!availability.peerRosterConsent) return false;
+    final pair = availability.peer._held.channel._pair;
+    switch (pair.peerRosterHint) {
+      case NearbyPeerRosterHint.absent:
+        return false;
+      case NearbyPeerRosterHint.unsupported:
+        throw const CompanyBootstrapRefusal('Peer roster support refused');
+      case NearbyPeerRosterHint.supported:
+        break;
+    }
+    final roster = await _CompanyPeerRoster.open(availability);
+    if (roster == null) return false;
+    Future<Map<String, Object?>> exchange(
+      String operation, [
+      Map<String, Object?> data = const {},
+      Future<void> Function()? beforeSend,
+    ]) async {
+      if (pair.peerRosterHint != NearbyPeerRosterHint.supported) {
+        throw const CompanyBootstrapRefusal('Peer roster support changed');
+      }
+      final reply = await _rpc(
+        'peerRoster',
+        {'profile': _peerRosterProfile, 'operation': operation, ...data},
+        beforeSend:
+            beforeSend ??
+            (operation == 'push' ? roster.requireDisclosureCurrent : null),
+      );
+      if (pair.peerRosterHint != NearbyPeerRosterHint.supported) {
+        throw const CompanyBootstrapRefusal('Peer roster support changed');
+      }
+      await roster.requireCurrent();
+      return reply;
+    }
+
+    if (roster.role == _PeerRosterRole.issuer) {
+      final known = _joinObject(await exchange('checkpoint'), {
+        'profile',
+        'checkpoint',
+      });
+      if (known['profile'] != _peerRosterProfile) {
+        throw const CompanyBootstrapRefusal('Peer roster checkpoint refused');
+      }
+      final page = await roster.page(
+        _decodePeerRosterCheckpoint(known['checkpoint']),
+      );
+      final receipt = await exchange('push', {'page': page});
+      roster.checkReceipt(page, receipt);
+      return page['more'] == true;
+    }
+
+    final page = await exchange('pull', {
+      'checkpoint': await roster.checkpoint(),
+    });
+    final receipt = await roster.acceptPage(page);
+    final acknowledgment = _joinObject(
+      await exchange('ack', {
+        'receipt': receipt,
+      }, () => roster.requirePageRetained(page)),
+      {'profile'},
+    );
+    if (acknowledgment['profile'] != _peerRosterProfile) {
+      throw const CompanyBootstrapRefusal('Peer roster acknowledgment refused');
+    }
+    return page['more'] == true;
+  }
+
   Future<CreatedJobSyncResult> syncNow() {
     if (_closed || isRunning) {
       throw const CompanyBootstrapRefusal('A Job sync is already running');
@@ -1984,6 +2108,7 @@ final class CompanyCreatedJobSync {
     _heldCreationJobs.clear();
     var unsupported = 0;
     var complete = false;
+    var peerRosterMore = false;
     var stage = CreatedJobSyncStage.preflight;
     CreatedJobSyncFailure? failure;
     const CreatedJobSyncDiagnostic.started().notify(onDiagnostic);
@@ -2019,6 +2144,7 @@ final class CompanyCreatedJobSync {
           'Company user roster exceeds capacity',
         );
       }
+      peerRosterMore = await _exchangePeerRoster();
       for (final userId in users) {
         await _requireUserRoster(localUsers);
         final offered = _joinObject(
@@ -2266,6 +2392,7 @@ final class CompanyCreatedJobSync {
       unsupported,
       failure: failure,
       held: _heldJobs,
+      peerRosterMore: peerRosterMore,
     );
     _terminal(result);
     return result;

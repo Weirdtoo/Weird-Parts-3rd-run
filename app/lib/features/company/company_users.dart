@@ -44,7 +44,8 @@ const kCompanyUserProfile = 'company.users.collection@1';
 String companyUserNamespace(String baseNamespace, {int slot = 1}) {
   validateInstallationNamespace(baseNamespace);
   if (baseNamespace.endsWith('.company-custody') ||
-      RegExp(r'\.company-user-[1-9][0-9]*$').hasMatch(baseNamespace)) {
+      RegExp(r'\.(company-user|peer-intro)-[1-9][0-9]*$')
+          .hasMatch(baseNamespace)) {
     throw ArgumentError.value(baseNamespace, 'baseNamespace');
   }
   if (slot < 1 || slot > kCompanyUserCapacity) {

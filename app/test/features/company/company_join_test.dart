@@ -158,6 +158,7 @@ final class JoinActivationStore
       delegate.writeRecoveryFileExclusive(path, bytes);
   bool loseNextBaseActivationReply = false;
   bool loseNextUserReply = false;
+  bool loseNextPeerIntroductionReply = false;
   int maximumBytes = 0;
   @override
   Future<String> compareAndSwapState(
@@ -195,6 +196,10 @@ final class JoinActivationStore
       nextRevision: nextRevision,
       bytes: bytes,
     );
+    if (loseNextPeerIntroductionReply && namespace.contains('.peer-intro-')) {
+      loseNextPeerIntroductionReply = false;
+      throw StateError('Lost protected peer introduction CAS response');
+    }
     if (loseNextUserReply && namespace.endsWith('.company-user-1')) {
       loseNextUserReply = false;
       throw StateError('Lost protected user CAS response');

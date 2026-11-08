@@ -47,7 +47,6 @@ enum StoreError: Error {
 }
 
 struct InstallationSecurityNamespace {
-  private static let maximumCompanyUsers = 2
   let rawValue: String
 
   init(_ rawValue: String) throws {
@@ -57,7 +56,8 @@ struct InstallationSecurityNamespace {
       throw StoreError.invalidArgument
     }
     if rawValue != "production" && rawValue != "production.company-custody"
-      && !Self.isCompanyUserNamespace(rawValue) {
+      && !Self.isIndexedCompanyNamespace(rawValue, prefix: "production.company-user-", maximum: 2)
+      && !Self.isIndexedCompanyNamespace(rawValue, prefix: "production.peer-intro-", maximum: 128) {
       let prefix = "synthetic."
       guard rawValue.hasPrefix(prefix),
         let first = bytes.dropFirst(prefix.utf8.count).first,
@@ -68,11 +68,12 @@ struct InstallationSecurityNamespace {
     self.rawValue = rawValue
   }
 
-  private static func isCompanyUserNamespace(_ value: String) -> Bool {
-    let prefix = "production.company-user-"
+  private static func isIndexedCompanyNamespace(
+    _ value: String, prefix: String, maximum: Int
+  ) -> Bool {
     guard value.hasPrefix(prefix) else { return false }
     let suffix = String(value.dropFirst(prefix.count))
-    guard let slot = Int(suffix), (1...maximumCompanyUsers).contains(slot) else {
+    guard let slot = Int(suffix), (1...maximum).contains(slot) else {
       return false
     }
     return suffix == String(slot)

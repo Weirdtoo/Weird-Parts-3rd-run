@@ -27,6 +27,16 @@ abstract interface class NearbyCompanyDisclosure {
   void requireLive();
 }
 
+abstract interface class NearbyCompanyPeerRosterDisclosure
+    implements NearbyCompanyDisclosure {
+  bool get peerRosterConsent;
+}
+
+enum NearbyPeerRosterHint { absent, supported, unsupported }
+
+const _peerRosterHeader = 'x-nearby-peer-roster';
+const _peerRosterVersion = '1';
+
 class NearbyViewState {
   const NearbyViewState({
     required this.phase,
@@ -862,6 +872,10 @@ class NearbyController {
         pair.requireCurrent();
         receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.disclosureLive;
         disclosure?.requireLive();
+        if (disclosure is NearbyCompanyPeerRosterDisclosure &&
+            disclosure.peerRosterConsent) {
+          request.response.headers.set(_peerRosterHeader, _peerRosterVersion);
+        }
         receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.responseWrite;
         await _writeJson(request, reply);
         if (receiveTrace != null) {
@@ -1457,6 +1471,13 @@ class NearbyController {
               : 'Nearby request failed',
         );
       }
+      if (path == '/v2/join' &&
+          disclosure is NearbyCompanyPeerRosterDisclosure &&
+          disclosure.peerRosterConsent) {
+        session?.joinSession?._recordPeerRosterHint(
+          response.headers[_peerRosterHeader],
+        );
+      }
       return map;
     } on TimeoutException catch (error) {
       trace?.fail(error);
@@ -1745,6 +1766,24 @@ final class NearbyPairedJoinSession {
   final Stopwatch _clock = Stopwatch()..start();
   final Set<String> _nonces = {};
   bool _revoked = false;
+  NearbyPeerRosterHint _peerRosterHint = NearbyPeerRosterHint.absent;
+
+  NearbyPeerRosterHint get peerRosterHint {
+    requireCurrent();
+    return _peerRosterHint;
+  }
+
+  void _recordPeerRosterHint(List<String>? values) {
+    if (_peerRosterHint == NearbyPeerRosterHint.unsupported) return;
+    if (values == null && _peerRosterHint == NearbyPeerRosterHint.absent) {
+      return;
+    }
+    _peerRosterHint =
+        values?.length == 1 && values!.single == _peerRosterVersion
+        ? NearbyPeerRosterHint.supported
+        : NearbyPeerRosterHint.unsupported;
+  }
+
   Duration get timeUntilExpiry => const Duration(minutes: 5) - _clock.elapsed;
   int get remainingReceivedNonces => 128 - _nonces.length;
   void revoke() => _revoked = true;

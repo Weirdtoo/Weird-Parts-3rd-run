@@ -106,6 +106,13 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  func testInstallationSecurityNamespaceAcceptsBoundedPeerIntroductionSlots() throws {
+    for slot in [1, 64, 128] {
+      let name = "production.peer-intro-" + String(slot)
+      XCTAssertEqual(try InstallationSecurityNamespace(name).rawValue, name)
+    }
+  }
+
   func testInstallationSecurityNamespacePreservesExistingNames() throws {
     let names = [
       "production",
@@ -154,6 +161,11 @@ class RunnerTests: XCTestCase {
       "production.company-user-2.extra",
       "production.company-User-1",
       "production.company-custody.extra",
+      "production.peer-intro-0",
+      "production.peer-intro-01",
+      "production.peer-intro-129",
+      "production.peer-intro-+1",
+      "production.peer-intro-1.extra",
     ]
 
     for name in names {

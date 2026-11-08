@@ -19,7 +19,11 @@ import '../company/src/join_proof_verifier.dart';
 import '../nearby/nearby_pairing.dart';
 import '../nearby/nearby_protocol.dart' show NearbyException;
 import '../nearby/nearby_controller.dart'
-    show NearbyPairedJoinSession, NearbyController, NearbyCompanyDisclosure;
+    show
+        NearbyPairedJoinSession,
+        NearbyController,
+        NearbyCompanyPeerRosterDisclosure,
+        NearbyPeerRosterHint;
 import '../job_line_commands/job_line_commands.dart'
     show
         JobLineCommand,
@@ -71,6 +75,7 @@ part '../company/company_user_pin_transfer.dart';
 part '../company/company_join.dart';
 part '../company/company_membership.dart';
 part '../company/company_peer_authentication.dart';
+part '../company/company_peer_introduction.dart';
 part '../company/company_created_job_sync.dart';
 part '../nearby/nearby_join_envelope.dart';
 
@@ -845,10 +850,14 @@ void validateInstallationNamespace(String namespace) {
       slot >= 1 &&
       slot <= kCompanyUserCapacity &&
       '$slot' == suffix;
+  final peerIntroductionNamespace = _indexedPeerIntroductionNamespace(
+    namespace,
+  );
   if (namespace.length > 64 ||
       !(namespace == 'production' ||
           namespace == 'production.company-custody' ||
           userNamespace ||
+          peerIntroductionNamespace ||
           RegExp(r'^synthetic\.[a-z0-9][a-z0-9._-]*$').hasMatch(namespace))) {
     throw ArgumentError.value(
       namespace,
@@ -861,7 +870,8 @@ void validateInstallationNamespace(String namespace) {
 String companyCustodyNamespace(String baseNamespace) {
   validateInstallationNamespace(baseNamespace);
   if (baseNamespace.endsWith('.company-custody') ||
-      RegExp(r'\.company-user-[1-9][0-9]*$').hasMatch(baseNamespace)) {
+      RegExp(r'\.(company-user|peer-intro)-[1-9][0-9]*$')
+          .hasMatch(baseNamespace)) {
     throw ArgumentError.value(baseNamespace, 'baseNamespace');
   }
   final companion = '$baseNamespace.company-custody';
