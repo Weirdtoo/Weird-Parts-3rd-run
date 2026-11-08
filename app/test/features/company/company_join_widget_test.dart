@@ -201,9 +201,19 @@ void main() {
           await tester.ensureVisible(
             find.byKey(const Key('company-user-provision')),
           );
-          await tester.runAsync(
-            () => tester.tap(find.byKey(const Key('company-user-provision'))),
-          );
+          var protectedReadRefused = false;
+          await tester.runAsync(() async {
+            f.aStore.onRead = (namespace) {
+              if (namespace == companyUserNamespace(f.a.namespace)) {
+                f.aStore.onRead = null;
+                protectedReadRefused = true;
+                throw const FileSystemException(
+                  'Synthetic protected read refused',
+                );
+              }
+            };
+            await tester.tap(find.byKey(const Key('company-user-provision')));
+          });
           await joinWidgetSignal(
             tester,
             () => find
@@ -214,10 +224,9 @@ void main() {
           newerError = tester
               .widget<Text>(find.byKey(const Key('company-join-error')))
               .data;
-          expect(
-            newerError,
-            contains('Use the compatible retained-peer Sync Now flow'),
-          );
+          expect(protectedReadRefused, isTrue);
+          expect(f.aStore.onRead, isNull);
+          expect(newerError, contains('Protected user account unavailable'));
         } else if (outcome == _PeerAckOutcome.closed) {
           tester.binding.handleAppLifecycleStateChanged(
             AppLifecycleState.inactive,
