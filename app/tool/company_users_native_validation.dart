@@ -742,6 +742,7 @@ final class CompanyUserTransportReceipts {
   final List<List<int>> _records = [];
   int _bytes = 0;
   int _written = 0;
+  // Rows offered to this writer after controller capture selection.
   int _attempted = 0;
   bool _disabled = false;
   bool _closed = false;
@@ -760,6 +761,7 @@ final class CompanyUserTransportReceipts {
         discovery: LanNearbyDiscovery(),
         companyJoin: true,
         onTransportObservation: record,
+        transportCapture: NearbyTransportCapture.terminal,
         onJoinReceiveObservation: recordJoinReceive,
       );
     }

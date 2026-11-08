@@ -84,6 +84,7 @@ class NearbyController {
     this.now,
     this.companyJoin = false,
     this.onTransportObservation,
+    this.transportCapture = NearbyTransportCapture.all,
     this.onJoinReceiveObservation,
   }) : _transportController = onTransportObservation == null
            ? null
@@ -166,6 +167,7 @@ class NearbyController {
   final DateTime Function()? now;
   final bool companyJoin;
   final NearbyTransportObserver? onTransportObservation;
+  final NearbyTransportCapture transportCapture;
   final NearbyJoinReceiveObserver? onJoinReceiveObservation;
   static int _nextTransportController = 0;
   final int? _transportController;
@@ -173,8 +175,18 @@ class NearbyController {
   int _transportRequests = 0;
   int _joinReceiveRequests = 0;
 
-  void _observeTransport(NearbyTransportObservation event) =>
-      _observeTransportEvent(onTransportObservation, event);
+  void _observeTransport(NearbyTransportObservation event) {
+    if (transportCapture == NearbyTransportCapture.terminal &&
+        event.operation != NearbyTransportOperation.room &&
+        event.stage != NearbyTransportStage.responseVerified &&
+        event.failure == null &&
+        !(event.stage == NearbyTransportStage.httpResponse &&
+            event.httpStatus != null &&
+            event.httpStatus != HttpStatus.ok)) {
+      return;
+    }
+    _observeTransportEvent(onTransportObservation, event);
+  }
 
   void _observeTransportEvent<T>(
     FutureOr<void> Function(T)? observer,

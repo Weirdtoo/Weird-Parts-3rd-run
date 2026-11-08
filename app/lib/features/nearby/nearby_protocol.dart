@@ -24,6 +24,8 @@ enum NearbyTransportOperation {
   room,
 }
 
+enum NearbyTransportCapture { all, terminal }
+
 enum NearbyTransportStage {
   selected,
   factoryTarget,
