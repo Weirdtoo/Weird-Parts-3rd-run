@@ -25,6 +25,18 @@ final class _UserProvisionGrantContext {
   final String recipient;
 }
 
+final class _UserProvisionConfirmation {
+  const _UserProvisionConfirmation(
+    this.peer,
+    this.user,
+    this.head,
+    this.source,
+    this.recipient,
+  );
+  final VerifiedPeerMembership peer;
+  final String user, head, source, recipient;
+}
+
 /// Current release capacity; storage locators are never company user identities.
 const kCompanyUserCapacity = 2;
 const kCompanyUserProfile = 'company.users.collection@1';
@@ -95,24 +107,35 @@ final class VerifiedUserProvisionRequest {
 }
 
 final class UserProvisionInvitation {
-  UserProvisionInvitation._(this.requestId, this.userId, this.name, this._peer);
+  UserProvisionInvitation._(
+    this.requestId,
+    this.userId,
+    this.name,
+    this._peer, [
+    this._initial,
+  ]);
   final String requestId;
   final String userId;
   final String name;
   final VerifiedPeerMembership _peer;
+  final _InitialUserScope? _initial;
 }
 
 final class CompanyUserProvisionStatus {
   CompanyUserProvisionStatus._(
     this.userId,
     this.targetDeviceId,
-    this.confirmed, [
+    this.confirmed, {
     this.disabled = false,
-  ]);
+    this.historical = false,
+    this.policyDelivered = false,
+  });
   final String userId;
   final String? targetDeviceId;
   final bool confirmed;
   final bool disabled;
+  final bool historical;
+  final bool policyDelivered;
 }
 
 void _validateUserName(String name) {
@@ -477,6 +500,7 @@ extension CompanyUsers on CompanyEnrollment {
   Future<CompanyUserProvisionStatus?> userProvisionStatus(
     OwnerSession owner, {
     required String userId,
+    VerifiedPeerMembership? peer,
   }) async {
     await _requireUserAdministrator(owner);
     final account = await _readUserAccount(userId: userId);
@@ -484,13 +508,91 @@ extension CompanyUsers on CompanyEnrollment {
     final user = await _checkUserAccount(account, requireActive: false);
     final outgoing = account.values['o'];
     final disable = account.disable;
+    if (peer != null && !account.isDisabled) {
+      await _requireUserPeer(peer);
+      final matches = (await _initialAuthorizations())
+          .where(
+            (a) =>
+                a.scope.user == userId &&
+                a.scope.head == user.commitment &&
+                a.scope.recipient[0] == peer.deviceId,
+          )
+          .toList();
+      String? knownSource, knownRecipient;
+      final offer = _initialUserTransfer;
+      if (offer is _InitialUserOffer &&
+          identical(offer.peer, peer) &&
+          identical(offer.owner, owner) &&
+          offer.scope.user == userId &&
+          offer.scope.head == user.commitment) {
+        await _initialScopePeer(offer.scope, peer, issuer: true);
+        knownSource = _securityCanonical(offer.scope.source);
+        knownRecipient = _securityCanonical(offer.scope.recipient);
+      }
+      final confirmation = _userProvisionConfirmation;
+      if (confirmation != null &&
+          identical(confirmation.peer, peer) &&
+          confirmation.user == userId &&
+          confirmation.head == user.commitment &&
+          confirmation.source ==
+              _securityCanonical(await _lifecycleLocalBinding())) {
+        knownSource = confirmation.source;
+        knownRecipient = confirmation.recipient;
+      }
+      var historical = false;
+      var confirmed = false;
+      for (final auth in matches) {
+        if (await _readInitialReceipt(auth) != null) {
+          if (_securityCanonical(auth.scope.source) == knownSource &&
+              _securityCanonical(auth.scope.recipient) == knownRecipient) {
+            confirmed = true;
+          } else {
+            historical = true;
+          }
+        }
+      }
+      if (!account.isCurrentState &&
+          outgoing is List &&
+          outgoing[2] == peer.deviceId &&
+          account.values['r'] != null) {
+        await _joinVerify(
+          await _userReceiptBody(account),
+          account.values['r'],
+          outgoing[5],
+          'wiredpart.company.user.provision.receipt@1:',
+        );
+        if (_securityCanonical(outgoing.skip(2).toList()) == knownRecipient &&
+            knownSource == _securityCanonical(await _lifecycleLocalBinding())) {
+          confirmed = true;
+        } else {
+          historical = true;
+        }
+      }
+      await _requireUserAdministrator(owner);
+      await _requireUserPeer(peer);
+      return CompanyUserProvisionStatus._(
+        userId,
+        peer.deviceId,
+        confirmed,
+        historical: historical && !confirmed,
+        policyDelivered: account.isCurrentState && account.values['r'] != null,
+      );
+    }
+    if (account.isCurrentState && !account.isDisabled) {
+      return CompanyUserProvisionStatus._(
+        userId,
+        outgoing is List ? outgoing[2] as String : null,
+        false,
+        policyDelivered: account.values['r'] != null,
+      );
+    }
     return CompanyUserProvisionStatus._(
       user.user['id'] as String,
       disable != null
           ? (disable.target?[1] as String?)
           : (outgoing is List ? outgoing[2] as String : null),
       disable != null ? disable.receipt != null : account.values['r'] != null,
-      account.isDisabled,
+      disabled: account.isDisabled,
     );
   }
 
@@ -498,6 +600,7 @@ extension CompanyUsers on CompanyEnrollment {
     required OwnerSession owner,
     required VerifiedPeerMembership peer,
     required String userId,
+    String? requestId,
   }) async {
     await _requireUserAdministrator(owner);
     await _requireUserPeer(peer);
@@ -505,13 +608,22 @@ extension CompanyUsers on CompanyEnrollment {
     if (account == null) {
       throw const CompanyBootstrapRefusal('Create one additional user first');
     }
-    if (account.isCurrentState) {
-      throw const CompanyBootstrapRefusal(
-        'Use the compatible retained-peer Sync Now flow for the current user PIN state',
-      );
-    }
     await _checkUserAccount(account);
     final outgoing = account.values['o'];
+    if (requestId != null ||
+        account.isCurrentState ||
+        (outgoing is List && outgoing[2] != peer.deviceId) ||
+        (await _initialAuthorizations()).any(
+          (a) =>
+              a.scope.user == userId && a.scope.recipient[0] == peer.deviceId,
+        )) {
+      return _prepareInitialUserProbe(
+        owner,
+        peer,
+        account,
+        requestId: requestId,
+      );
+    }
     if (outgoing is List &&
         (outgoing[0] != 0 || outgoing[2] != peer.deviceId)) {
       throw const CompanyBootstrapRefusal(
@@ -547,25 +659,28 @@ extension CompanyUsers on CompanyEnrollment {
     Map<String, Object?> wire, {
     required VerifiedPeerMembership peer,
   }) async {
-    final channel = await _userChannel(peer);
-    final body = _joinObject(
-      await _openUserEnvelope(
-        channel,
-        'user-provision-invite',
-        wire,
-        recipient: base64Encode(installation.identity!.publicKey),
-      ),
-      {
-        'v',
-        'kind',
-        'profile',
-        'capacity',
-        'request',
-        'certificate',
-        'sender',
-        'recipient',
-      },
+    final channel = await _userSyncChannel(peer);
+    final opened = await _openUserEnvelope(
+      channel,
+      'user-provision-invite',
+      wire,
+      recipient: base64Encode(installation.identity!.publicKey),
     );
+    if (opened['kind'] ==
+        'company.user.initial-provision.invitation-envelope@2') {
+      return _receiveInitialUserInvitation(opened, peer);
+    }
+    await _requireUserPeer(peer);
+    final body = _joinObject(opened, {
+      'v',
+      'kind',
+      'profile',
+      'capacity',
+      'request',
+      'certificate',
+      'sender',
+      'recipient',
+    });
     _joinId(body, 'request');
     if (body['v'] != 1 ||
         body['kind'] != 'company.user.provision.invite@1' ||
@@ -605,11 +720,13 @@ extension CompanyUsers on CompanyEnrollment {
 
   Future<Map<String, Object?>> acceptUserProvisionInvitation(
     UserProvisionInvitation invitation,
-  ) => prepareUserProvisionRequest(
-    peer: invitation._peer,
-    requestId: invitation.requestId,
-    userId: invitation.userId,
-  );
+  ) => invitation._initial != null
+      ? _acceptInitialUserInvitation(invitation)
+      : prepareUserProvisionRequest(
+          peer: invitation._peer,
+          requestId: invitation.requestId,
+          userId: invitation.userId,
+        );
 
   Future<void> _requireSessionAccount(CompanySession session) =>
       _validateSessionAccount(session, syncOnly: false);
@@ -809,6 +926,9 @@ extension CompanyUsers on CompanyEnrollment {
     Map<String, Object?> wire, {
     required VerifiedPeerMembership peer,
   }) async {
+    if (wire['kind'] == 'user-initial-provision-request@2') {
+      return _receiveInitialUserRequest(wire, peer);
+    }
     final snapshot = _securityCanonical(wire);
     if (utf8.encode(snapshot).length > 2048) {
       throw const CompanyBootstrapRefusal('User request capacity reached');
@@ -873,6 +993,9 @@ extension CompanyUsers on CompanyEnrollment {
     required VerifiedPeerMembership peer,
     required VerifiedUserProvisionRequest request,
   }) async {
+    if (request._body['kind'] == 'company.user.initial-provision.request@2') {
+      return _prepareInitialUserProvision(owner, peer, request);
+    }
     _userProvisionGrantContext = null;
     await requireCompanyJoinSchema(db);
     if (!identical(request._peer, peer)) {
@@ -1017,6 +1140,13 @@ extension CompanyUsers on CompanyEnrollment {
     Map<String, Object?> wire, {
     required VerifiedPeerMembership peer,
   }) async {
+    final initialIssuance = wire['issuance'];
+    if (initialIssuance is Map &&
+        initialIssuance['body'] is Map &&
+        (initialIssuance['body'] as Map)['kind'] ==
+            'company.user.initial-provision.issuance@2') {
+      return _acceptInitialUserProvision(wire, peer);
+    }
     await requireCompanyJoinSchema(db);
     final snapshot = _securityCanonical(wire);
     if (utf8.encode(snapshot).length > 8192) {
@@ -1243,6 +1373,12 @@ extension CompanyUsers on CompanyEnrollment {
       ),
       {'body', 'signature'},
     );
+    if (signed['body'] is Map &&
+        (signed['body'] as Map)['kind'] ==
+            'company.user.initial-provision.installed@2') {
+      await _acceptInitialUserReceipt(signed, peer, userId);
+      return;
+    }
     var account = await _readUserAccount(userId: userId);
     if (account == null ||
         account.values['o'] is! List ||
@@ -1289,6 +1425,13 @@ extension CompanyUsers on CompanyEnrollment {
         context,
         receiptBody,
         signed['signature'] as String,
+      );
+      _userProvisionConfirmation = _UserProvisionConfirmation(
+        peer,
+        userId,
+        context.certificate,
+        context.source,
+        context.recipient,
       );
       if (identical(_userProvisionGrantContext, context)) {
         _userProvisionGrantContext = null;

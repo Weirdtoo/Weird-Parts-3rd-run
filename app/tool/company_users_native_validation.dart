@@ -742,6 +742,8 @@ final class CompanyUserTransportReceipts {
   final List<List<int>> _records = [];
   int _bytes = 0;
   int _written = 0;
+  // Rows offered to this writer after controller capture selection.
+  int _attempted = 0;
   bool _disabled = false;
   bool _closed = false;
   RandomAccessFile? _handle;
@@ -759,6 +761,8 @@ final class CompanyUserTransportReceipts {
         discovery: LanNearbyDiscovery(),
         companyJoin: true,
         onTransportObservation: record,
+        transportCapture: NearbyTransportCapture.terminal,
+        onJoinReceiveObservation: recordJoinReceive,
       );
     }
     int? controller;
@@ -768,16 +772,31 @@ final class CompanyUserTransportReceipts {
         controller ??= event.controller;
         record(event);
       },
+      observeJoinReceive: recordJoinReceive,
       cancel: () => diagnostic.cancelController(controller),
     );
   }
 
   void record(NearbyTransportObservation event) {
     _networkDiagnostic?.observe(event);
-    _append(event.toJson());
+    _append({
+      ...event.toJson(),
+      if (event.operation == NearbyTransportOperation.room &&
+          event.stage == NearbyTransportStage.stopped)
+        'capture': {
+          'attemptedBeforeThisRow': _attempted,
+          'capturedBeforeThisRow': _records.length,
+          'droppedBeforeThisRow': _attempted - _records.length,
+          'writtenBeforeThisRow': _written,
+        },
+    });
   }
 
+  void recordJoinReceive(NearbyJoinReceiveObservation event) =>
+      _append(event.toJson());
+
   void _append(Map<String, Object?> event) {
+    if (_attempted < 2147483647) _attempted++;
     if (_disabled || _closed || _records.length >= maxRecords) return;
     try {
       final bytes = utf8.encode('${jsonEncode({..._metadata, ...event})}\n');
@@ -848,6 +867,7 @@ final class _DiagnosticNearbyController extends NearbyController {
   _DiagnosticNearbyController({
     required String alias,
     required NearbyTransportObserver observe,
+    required NearbyJoinReceiveObserver observeJoinReceive,
     required this.cancel,
   }) : super(
          deviceId: alias,
@@ -855,6 +875,7 @@ final class _DiagnosticNearbyController extends NearbyController {
          discovery: LanNearbyDiscovery(),
          companyJoin: true,
          onTransportObservation: observe,
+         onJoinReceiveObservation: observeJoinReceive,
        );
   final Future<void> Function() cancel;
 

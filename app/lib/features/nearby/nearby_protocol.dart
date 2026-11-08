@@ -24,6 +24,8 @@ enum NearbyTransportOperation {
   room,
 }
 
+enum NearbyTransportCapture { all, terminal }
+
 enum NearbyTransportStage {
   selected,
   factoryTarget,
@@ -67,6 +69,54 @@ typedef NearbyTransportObserver = FutureOr<void> Function(
   NearbyTransportObservation event,
 );
 const kNearbyTransportObservationLimit = 128;
+
+enum NearbyJoinReceiveBoundary {
+  pairBeforeBody,
+  bodyRead,
+  pairAfterBody,
+  disclosureGate,
+  callbackLookup,
+  callback,
+  callbackReturnedDisclosureCurrent,
+  pairAfterCallback,
+  disclosureLive,
+  responseWrite,
+  completed,
+}
+
+enum NearbyJoinReceiveOutcome { completed, caughtFailure }
+
+typedef NearbyJoinReceiveObserver = FutureOr<void> Function(
+  NearbyJoinReceiveObservation event,
+);
+
+/// A terminal observation for one authenticated request, local to its receiver.
+final class NearbyJoinReceiveObservation {
+  const NearbyJoinReceiveObservation({
+    required this.request,
+    required this.lastBoundary,
+    required this.outcome,
+    required this.eventUtc,
+    required this.elapsedMicros,
+  });
+
+  final int request;
+
+  /// The operation being attempted on failure, or completed after the write.
+  final NearbyJoinReceiveBoundary lastBoundary;
+  final NearbyJoinReceiveOutcome outcome;
+  final DateTime eventUtc;
+  final int elapsedMicros;
+
+  Map<String, Object?> toJson() => {
+    'operation': 'join',
+    'outcome': outcome.name,
+    'lastBoundary': lastBoundary.name,
+    'request': request,
+    'eventUtc': eventUtc.toUtc().toIso8601String(),
+    'elapsedMicros': elapsedMicros,
+  };
+}
 
 /// Local measurements contain no protocol bytes or error strings.
 final class NearbyTransportObservation {

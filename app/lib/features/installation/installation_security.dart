@@ -63,6 +63,7 @@ import '../job_line_commands/job_line_commands.dart'
 
 part '../company/company_protocol.dart';
 part '../company/company_users.dart';
+part '../company/company_user_initial_provision.dart';
 part '../company/company_user_disable.dart';
 part '../company/company_user_state_codec.dart';
 part '../company/company_user_pin_recovery.dart';

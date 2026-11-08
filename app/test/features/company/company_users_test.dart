@@ -103,7 +103,7 @@ _peers(
   return (a: aPeer, b: done.membership, ac: aController, bc: bController);
 }
 
-Future<Map<String, Object?>> _readSyncFrame(
+Future<Map<String, Object?>> readSyncFrame(
   NearbyPairedJoinSession pair,
   Map<String, Object?> wire,
 ) async {
@@ -2231,7 +2231,7 @@ void main() {
         peer: peers.b,
       );
       peers.bc.onJoinMessage = (pair, wire) async {
-        final body = await _readSyncFrame(pair, wire);
+        final body = await readSyncFrame(pair, wire);
         disclosed.add(body);
         return syncAttackWire(
           pair,

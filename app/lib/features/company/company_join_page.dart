@@ -213,8 +213,12 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
         'user-provision-request',
         'user-provision-bundle',
         'user-provision-ack',
+        'user-initial-provision-probe@2',
+        'user-initial-provision-response@2',
       ].contains(wire['kind'])) {
-        if (widget.approver == null) {
+        if (widget.approver == null &&
+            (wire['kind'] == 'user-provision-request' ||
+                wire['kind'] == 'user-provision-ack')) {
           throw const CompanyBootstrapRefusal('Owner sign-in required');
         }
         return _receiveUser(wire);
@@ -365,7 +369,21 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
     }
     _userReceiving = true;
     try {
-      if (wire['kind'] == 'user-provision-invite') {
+      if (wire['kind'] == 'user-initial-provision-probe@2' ||
+          wire['kind'] == 'user-initial-provision-response@2') {
+        if (wire['kind'] == 'user-initial-provision-probe@2' &&
+            _userTransferPending) {
+          throw const CompanyBootstrapRefusal(
+            'Finish the selected user transfer first',
+          );
+        }
+        final reply = await widget.enrollment.receiveUserProvisionNegotiation(
+          wire,
+          peer: peer,
+        );
+        _requireTransferPeer(peer);
+        unawaited(_sendPeerReply(reply));
+      } else if (wire['kind'] == 'user-provision-invite') {
         final invitation = await widget.enrollment
             .receiveUserProvisionInvitation(wire, peer: peer);
         _requireTransferPeer(peer);
@@ -452,6 +470,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
         final status = await widget.enrollment.userProvisionStatus(
           widget.approver!,
           userId: target,
+          peer: peer,
         );
         _requireTransferPeer(peer, target);
         if (mounted) {
@@ -541,6 +560,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
       final status = await widget.enrollment.userProvisionStatus(
         widget.approver!,
         userId: userId!,
+        peer: _peerMembership,
       );
       if (mounted &&
           !_closed &&
@@ -900,6 +920,10 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
                 Text(
                   status.disabled
                       ? 'Selected user is disabled. Reconnect and Sync Now to deliver the decision.'
+                      : status.historical
+                      ? 'An earlier receiving store confirmed this user. Retry to verify this peer and its current store.'
+                      : status.policyDelivered && !status.confirmed
+                      ? 'Account changes were acknowledged. Provision this user to confirm offline PIN access.'
                       : status.targetDeviceId == null
                       ? 'Selected user has not been provisioned to a retained peer.'
                       : status.confirmed

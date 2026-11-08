@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show debugPrintSynchronously;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wired_parts/features/nearby/nearby_controller.dart';
 import 'package:wired_parts/features/nearby/nearby_protocol.dart';
@@ -100,7 +101,7 @@ void main() {
           generation: 9223372036854775807,
           controller: 9223372036854775807,
           operation: NearbyTransportOperation.room,
-          stage: NearbyTransportStage.responseAuthentication,
+          stage: NearbyTransportStage.stopped,
           elapsedMicros: 9223372036854775807,
           peerAddress: '255.255.255.255',
           peerPort: 65535,
@@ -125,6 +126,12 @@ void main() {
       expect(row['listenerPort'], 65535);
       expect(row['generation'], 9223372036854775807);
       expect(row['stopReason'], 'startupFailure');
+      expect(row['capture'], {
+        'attemptedBeforeThisRow': 0,
+        'capturedBeforeThisRow': 0,
+        'droppedBeforeThisRow': 0,
+        'writtenBeforeThisRow': 0,
+      });
     } finally {
       await writer.close();
       directory.deleteSync(recursive: true);
@@ -177,6 +184,7 @@ void main() {
       'ordinary Pair and authenticated Join preserve behavior with observer $mode',
       () async {
         final events = <NearbyTransportObservation>[];
+        final received = Completer<NearbyJoinReceiveObservation>();
         final hostDiscovery = JoinTestDiscovery();
         final guestDiscovery = JoinTestDiscovery();
         final host = NearbyController(
@@ -186,6 +194,18 @@ void main() {
           companyJoin: true,
           bindAddress: InternetAddress.loopbackIPv4,
           localIps: () async => ['127.0.0.1'],
+          onJoinReceiveObservation: mode == 'off'
+              ? null
+              : (event) {
+                  received.complete(event);
+                  if (mode == 'throw') throw StateError('private-marker');
+                  if (mode == 'asyncThrow') {
+                    return Future<void>.delayed(
+                      Duration.zero,
+                      () => throw StateError('private-async-marker'),
+                    );
+                  }
+                },
         );
         final guest = NearbyController(
           deviceId: 'guest',
@@ -253,8 +273,21 @@ void main() {
         expect(events, hasLength(count));
         if (mode == 'off') {
           expect(guest.onTransportObservation, isNull);
+          expect(host.onJoinReceiveObservation, isNull);
           expect(events, isEmpty);
+          expect(received.isCompleted, isFalse);
         } else {
+          final receive = await received.future;
+          expect(receive.toJson(), {
+            'operation': 'join',
+            'outcome': 'completed',
+            'lastBoundary': 'completed',
+            'request': 1,
+            'eventUtc': receive.eventUtc.toIso8601String(),
+            'elapsedMicros': receive.elapsedMicros,
+          });
+          expect(receive.eventUtc.isUtc, isTrue);
+          expect(receive.elapsedMicros, greaterThanOrEqualTo(0));
           expect(
             events.map((event) => event.operation),
             containsAll([
@@ -298,6 +331,349 @@ void main() {
       },
     );
   }
+
+  test(
+    'terminal capture preserves Wi-Fi Join evidence before the shared cap',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'terminal-transport-',
+      );
+      final writer = receipts(directory);
+      addTearDown(() async {
+        await writer.close();
+        await directory.delete(recursive: true);
+      });
+      final events = <NearbyTransportObservation>[];
+      final reverse = Completer<NearbyJoinReceiveObservation>();
+      final network = _ObservedLoopbackNetwork();
+      final hostDiscovery = JoinTestDiscovery();
+      final guestDiscovery = JoinTestDiscovery();
+      final host = NearbyController(
+        deviceId: 'host',
+        deviceName: 'Host',
+        discovery: hostDiscovery,
+        companyJoin: true,
+        bindAddress: InternetAddress.loopbackIPv4,
+        localIps: () async => ['127.0.0.1'],
+      );
+      final guest = NearbyController(
+        deviceId: 'guest',
+        deviceName: 'Guest',
+        discovery: guestDiscovery,
+        companyJoin: true,
+        readNetwork: () async => network,
+        transportCapture: NearbyTransportCapture.terminal,
+        onTransportObservation: (event) {
+          events.add(event);
+          writer.record(event);
+        },
+        onJoinReceiveObservation: (event) {
+          writer.recordJoinReceive(event);
+          reverse.complete(event);
+        },
+      );
+      addTearDown(hostDiscovery.controller.close);
+      addTearDown(guestDiscovery.controller.close);
+      addTearDown(host.dispose);
+      addTearDown(guest.dispose);
+      host.onJoinMessage = (_, _) async => {'ok': true};
+      guest.onJoinMessage = (_, _) async => {'ok': true};
+      await host.start();
+      await guest.start();
+      await guest.pair(
+        NearbyPeer(
+          deviceId: 'host',
+          name: 'Host',
+          host: '127.0.0.1',
+          port: hostDiscovery.port,
+        ),
+      );
+      expect(guest.state.verifyCode != null, isTrue);
+      expect(guest.state.verifyCode == host.state.verifyCode, isTrue);
+      await host.confirmCode();
+      await guest.confirmCode();
+      expect(host.transportCapture, NearbyTransportCapture.all);
+
+      Future<List<Map<String, Object?>>> capture(String phase) async {
+        await writer.drain();
+        final file = File(writer.filePath);
+        final lines = await file.readAsLines();
+        final bytes = await file.length();
+        expect(lines, hasLength(writer.capturedCount));
+        expect(lines.length, lessThan(CompanyUserTransportReceipts.maxRecords));
+        expect(bytes, lessThan(CompanyUserTransportReceipts.maxTotalBytes));
+        debugPrintSynchronously(
+          'Terminal transport $phase rows=${lines.length} bytes=$bytes '
+          'Wi-Fi stages=${network.observedStages}',
+        );
+        return [
+          for (final line in lines)
+            Map<String, Object?>.from(jsonDecode(line) as Map),
+        ];
+      }
+
+      Future<void> sendGroup(int count) async {
+        for (var index = 0; index < count; index++) {
+          await guest.sendJoinMessage({'kind': 'request'});
+        }
+      }
+
+      final baseline = (await capture('baseline')).length;
+      final pairWifiStages = network.observedStages;
+      await sendGroup(17);
+      expect((await capture('first')).length - baseline, 17);
+      await sendGroup(13);
+      expect((await capture('repeat')).length - baseline, 30);
+      expect(network.observedStages - pairWifiStages, 30 * 6);
+      expect(
+        network.observedStages - pairWifiStages,
+        greaterThan(kNearbyTransportObservationLimit),
+      );
+      final verified = events.where(
+        (event) => event.operation == NearbyTransportOperation.join,
+      );
+      expect(verified, hasLength(30));
+      expect(verified.map((event) => event.request).toSet(), hasLength(30));
+      for (final event in verified) {
+        expect(event.stage, NearbyTransportStage.responseVerified);
+        expect(event.httpStatus, isNull);
+        expect(event.failure, isNull);
+      }
+
+      host.onJoinMessage = (_, _) async {
+        throw StateError('private-transport-refusal-marker');
+      };
+      final beforeRefusal = events.length;
+      await expectLater(
+        guest.sendJoinMessage({'kind': 'request'}),
+        throwsA(
+          isA<NearbyException>().having(
+            (error) => error.message,
+            'message',
+            'Join refused',
+          ),
+        ),
+      );
+      final refused = events.skip(beforeRefusal).toList();
+      expect(refused.map((event) => event.stage), [
+        NearbyTransportStage.httpResponse,
+        NearbyTransportStage.responseVerified,
+        NearbyTransportStage.responseVerified,
+      ]);
+      expect(refused.map((event) => event.request).toSet(), hasLength(1));
+      expect(refused.first.httpStatus, HttpStatus.internalServerError);
+      expect(refused[1].httpStatus, isNull);
+      expect(refused[1].failure, isNull);
+      expect(refused.last.failure, NearbyTransportFailure.refused);
+
+      await host.sendJoinMessage({'kind': 'request'});
+      expect(
+        (await reverse.future).outcome,
+        NearbyJoinReceiveOutcome.completed,
+      );
+      final beforeStop = (await capture('reverse and refusal')).length;
+      expect(beforeStop - baseline, 34);
+      await guest.stop();
+      final finalRows = await capture('stopped');
+      expect(
+        finalRows.where((row) => row['outcome'] == 'completed'),
+        hasLength(1),
+      );
+      expect(
+        finalRows.skip(beforeStop).map((row) => row['stage']),
+        containsAllInOrder(['stopping', 'stopped']),
+      );
+      final stoppedIndex = finalRows.indexWhere(
+        (row) => row['stage'] == 'stopped',
+      );
+      final health = finalRows[stoppedIndex]['capture'] as Map;
+      expect(health['attemptedBeforeThisRow'], stoppedIndex);
+      expect(health['capturedBeforeThisRow'], stoppedIndex);
+      expect(health['droppedBeforeThisRow'], 0);
+      expect(
+        health['writtenBeforeThisRow'],
+        inInclusiveRange(beforeStop, stoppedIndex),
+      );
+      expect(
+        jsonEncode(finalRows),
+        isNot(contains('private-transport-refusal-marker')),
+      );
+    },
+  );
+
+  test(
+    'authenticated Join refusal stages retain existing signed responses',
+    () async {
+      final events = <NearbyJoinReceiveObservation>[];
+      final hostDiscovery = JoinTestDiscovery();
+      final guestDiscovery = JoinTestDiscovery();
+      final host = NearbyController(
+        deviceId: 'host',
+        deviceName: 'Host',
+        discovery: hostDiscovery,
+        companyJoin: true,
+        bindAddress: InternetAddress.loopbackIPv4,
+        localIps: () async => ['127.0.0.1'],
+        onJoinReceiveObservation: events.add,
+      );
+      final guest = NearbyController(
+        deviceId: 'guest',
+        deviceName: 'Guest',
+        discovery: guestDiscovery,
+        companyJoin: true,
+        bindAddress: InternetAddress.loopbackIPv4,
+        localIps: () async => ['127.0.0.1'],
+      );
+      addTearDown(hostDiscovery.controller.close);
+      addTearDown(guestDiscovery.controller.close);
+      addTearDown(host.dispose);
+      addTearDown(guest.dispose);
+      final client = HttpClient()..findProxy = (_) => 'DIRECT';
+      addTearDown(() => client.close(force: true));
+      var invoked = 0;
+      host.onJoinMessage = (_, _) async {
+        invoked++;
+        throw StateError('private-callback-marker');
+      };
+      await host.start();
+      await guest.start();
+      await guest.pair(
+        NearbyPeer(
+          deviceId: 'host',
+          name: 'Host',
+          host: '127.0.0.1',
+          port: hostDiscovery.port,
+        ),
+      );
+      expect(guest.state.verifyCode, host.state.verifyCode);
+      await host.confirmCode();
+      await guest.confirmCode();
+      final keys = guest.pairedJoinSession!.keys;
+      Future<void> post(
+        String json, {
+        NearbyJoinReceiveBoundary? boundary,
+      }) async {
+        const method = 'POST';
+        const path = '/v2/join';
+        final body = utf8.encode(json);
+        final request = await client.open(
+          method,
+          '127.0.0.1',
+          hostDiscovery.port,
+          path,
+        );
+        request.headers.contentType = ContentType.json;
+        request.contentLength = body.length;
+        final proof = boundary == null
+            ? null
+            : keys.signRequest(method, path, body);
+        if (proof != null) {
+          request.headers.set('x-nearby-session', keys.id);
+          request.headers.set('x-nearby-sequence', proof.sequence);
+          request.headers.set('x-nearby-digest', proof.digest);
+          request.headers.set('x-nearby-mac', proof.mac);
+        }
+        final count = events.length;
+        request.add(body);
+        final response = await request.close();
+        final bytes = await response.expand((chunk) => chunk).toList();
+        if (proof == null) {
+          expect(response.statusCode, HttpStatus.forbidden);
+          expect(response.headers.value('x-nearby-mac'), isNull);
+          expect(jsonDecode(utf8.decode(bytes)), {'error': 'Join unavailable'});
+          expect(events, hasLength(count));
+          return;
+        }
+        expect(response.statusCode, HttpStatus.internalServerError);
+        keys.verifyResponse(
+          proof,
+          method,
+          path,
+          response.statusCode,
+          bytes,
+          response.headers.value('x-nearby-mac'),
+        );
+        expect(jsonDecode(utf8.decode(bytes)), {'error': 'Join refused'});
+        expect(events, hasLength(count + 1));
+        final event = events.last;
+        expect(event.toJson(), {
+          'operation': 'join',
+          'outcome': 'caughtFailure',
+          'lastBoundary': boundary!.name,
+          'request': count + 1,
+          'eventUtc': event.eventUtc.toIso8601String(),
+          'elapsedMicros': event.elapsedMicros,
+        });
+        expect(event.eventUtc.isUtc, isTrue);
+        expect(event.elapsedMicros, greaterThanOrEqualTo(0));
+      }
+
+      await post('{"kind":"request"}');
+      await post(
+        '[private-body-marker',
+        boundary: NearbyJoinReceiveBoundary.bodyRead,
+      );
+      await post(
+        '{"kind":"created-jobs"}',
+        boundary: NearbyJoinReceiveBoundary.disclosureGate,
+      );
+      expect(invoked, 0);
+      await post(
+        '{"kind":"request"}',
+        boundary: NearbyJoinReceiveBoundary.callback,
+      );
+      expect(invoked, 1);
+
+      final disclosure = _RefusingDisclosure();
+      host.companySyncDisclosure = disclosure;
+      host.onJoinMessage = (_, _) async {
+        invoked++;
+        return {'ok': true};
+      };
+      await post(
+        '{"kind":"created-jobs"}',
+        boundary: NearbyJoinReceiveBoundary.callbackReturnedDisclosureCurrent,
+      );
+      expect(invoked, 2);
+      expect(disclosure.currentChecks, 1);
+      expect(disclosure.liveChecks, 0);
+      disclosure.refuseCurrent = false;
+      await post(
+        '{"kind":"created-jobs"}',
+        boundary: NearbyJoinReceiveBoundary.disclosureLive,
+      );
+      expect(invoked, 3);
+      expect(disclosure.currentChecks, 2);
+      expect(disclosure.liveChecks, 1);
+
+      host.onJoinMessage = (_, _) async {
+        invoked++;
+        return {'unencodable': Object()};
+      };
+      await post(
+        '{"kind":"request"}',
+        boundary: NearbyJoinReceiveBoundary.responseWrite,
+      );
+      expect(invoked, 4);
+
+      host.onJoinMessage = (pair, _) async {
+        invoked++;
+        pair.revoke();
+        return {'ok': true};
+      };
+      await post(
+        '{"kind":"request"}',
+        boundary: NearbyJoinReceiveBoundary.pairAfterCallback,
+      );
+      await post(
+        '{"kind":"request"}',
+        boundary: NearbyJoinReceiveBoundary.pairBeforeBody,
+      );
+      expect(invoked, 5);
+      expect(host.state.phase, NearbyPhase.paired);
+      expect(guest.state.phase, NearbyPhase.paired);
+    },
+  );
 
   test(
     'socket refusal retains categorical failure and fixed controller event cap',
@@ -368,6 +744,8 @@ void main() {
       expect(controller.readNetwork, same(readNearbyWifiNetwork));
       expect(controller.onJoinMessage, isNull);
       expect(controller.companySyncDisclosure, isNull);
+      expect(controller.onJoinReceiveObservation, isNotNull);
+      expect(controller.transportCapture, NearbyTransportCapture.terminal);
       expect(directory.listSync(), isEmpty);
     } finally {
       await controller.dispose();
@@ -386,9 +764,23 @@ void main() {
       final other = receipts(directory, suffix: 'b');
       try {
         expect(directory.listSync(), isEmpty);
-        for (var index = 0; index < 500; index++) {
+        for (
+          var index = 0;
+          index < CompanyUserTransportReceipts.maxRecords - 1;
+          index++
+        ) {
           writer.record(observation);
         }
+        final receive = NearbyJoinReceiveObservation(
+          request: 1,
+          lastBoundary: NearbyJoinReceiveBoundary.callback,
+          outcome: NearbyJoinReceiveOutcome.caughtFailure,
+          eventUtc: DateTime.utc(2026, 11, 8),
+          elapsedMicros: 123,
+        );
+        writer.recordJoinReceive(receive);
+        writer.record(observation);
+        writer.recordJoinReceive(receive);
         expect(
           directory.listSync(),
           isEmpty,
@@ -405,7 +797,24 @@ void main() {
           await file.length(),
           lessThanOrEqualTo(CompanyUserTransportReceipts.maxTotalBytes),
         );
-        for (final line in lines) {
+        final receiveRow = jsonDecode(lines.last) as Map;
+        const metadata = {
+          'kind',
+          'passed',
+          'localOnly',
+          'os',
+          'run',
+          'role',
+          'pid',
+          'sourceRevision',
+          'sourceTree',
+        };
+        expect(
+          receiveRow.keys.toSet().difference(metadata),
+          receive.toJson().keys.toSet(),
+        );
+        expect(receiveRow, containsPair('outcome', 'caughtFailure'));
+        for (final line in lines.take(lines.length - 1)) {
           expect(utf8.encode('$line\n').length, lessThanOrEqualTo(1024));
           final row = jsonDecode(line) as Map;
           expect(row['passed'], isFalse);
@@ -467,6 +876,67 @@ void main() {
       directory.deleteSync(recursive: true);
     }
   });
+}
+
+final class _RefusingDisclosure implements NearbyCompanyDisclosure {
+  bool refuseCurrent = true;
+  int currentChecks = 0;
+  int liveChecks = 0;
+
+  @override
+  Future<void> requireCurrent() async {
+    currentChecks++;
+    if (refuseCurrent) throw StateError('private-disclosure-current-marker');
+  }
+
+  @override
+  void requireLive() {
+    liveChecks++;
+    throw StateError('private-disclosure-live-marker');
+  }
+}
+
+final class _ObservedLoopbackNetwork extends NearbyWifiNetwork {
+  _ObservedLoopbackNetwork()
+    : super(name: 'test', index: 7, address: '192.168.10.20', prefixLength: 24);
+
+  int observedStages = 0;
+
+  @override
+  bool allowsPeer(String host) => host == InternetAddress.loopbackIPv4.address;
+
+  @override
+  Future<HttpServer> listen({
+    FutureOr<void> Function(String, int)? onListenerBound,
+  }) async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    await onListenerBound?.call(server.address.address, server.port);
+    return server;
+  }
+
+  @override
+  Future<ConnectionTask<Socket>> connect(
+    Uri uri, {
+    FutureOr<void> Function(NearbyTransportStage stage)? onStage,
+  }) async {
+    Future<void> observe(NearbyTransportStage stage) async {
+      if (onStage == null) return;
+      observedStages++;
+      await onStage(stage);
+    }
+
+    await observe(NearbyTransportStage.interfaceCheck);
+    await observe(NearbyTransportStage.interfaceValidated);
+    await observe(NearbyTransportStage.tcpStart);
+    final task = await Socket.startConnect(uri.host, uri.port);
+    final ready = task.socket.then((socket) async {
+      await observe(NearbyTransportStage.tcpConnected);
+      await observe(NearbyTransportStage.bindingCheck);
+      await observe(NearbyTransportStage.bindingValidated);
+      return socket;
+    });
+    return ConnectionTask.fromSocket(ready, task.cancel);
+  }
 }
 
 final class _RefusingNetwork extends NearbyWifiNetwork {
