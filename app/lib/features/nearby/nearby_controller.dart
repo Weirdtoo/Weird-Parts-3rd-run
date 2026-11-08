@@ -84,6 +84,7 @@ class NearbyController {
     this.now,
     this.companyJoin = false,
     this.onTransportObservation,
+    this.onJoinReceiveObservation,
   }) : _transportController = onTransportObservation == null
            ? null
            : ++_nextTransportController,
@@ -165,13 +166,20 @@ class NearbyController {
   final DateTime Function()? now;
   final bool companyJoin;
   final NearbyTransportObserver? onTransportObservation;
+  final NearbyJoinReceiveObserver? onJoinReceiveObservation;
   static int _nextTransportController = 0;
   final int? _transportController;
   int _transportObservations = 0;
   int _transportRequests = 0;
+  int _joinReceiveRequests = 0;
 
-  void _observeTransport(NearbyTransportObservation event) {
-    final observer = onTransportObservation;
+  void _observeTransport(NearbyTransportObservation event) =>
+      _observeTransportEvent(onTransportObservation, event);
+
+  void _observeTransportEvent<T>(
+    FutureOr<void> Function(T)? observer,
+    T event,
+  ) {
     if (observer == null ||
         _transportObservations >= kNearbyTransportObservationLimit) {
       return;
@@ -795,6 +803,7 @@ class NearbyController {
   }
 
   Future<void> _handleHttp(HttpRequest request) async {
+    _NearbyJoinReceiveTrace? receiveTrace;
     try {
       if (!_allowsPeer(request.connectionInfo?.remoteAddress.address ?? '')) {
         request.response.statusCode = HttpStatus.forbidden;
@@ -812,9 +821,16 @@ class NearbyController {
           await _writeJson(request, {'error': 'Join unavailable'});
           return;
         }
+        if (onJoinReceiveObservation != null &&
+            _transportObservations < kNearbyTransportObservationLimit) {
+          receiveTrace = _NearbyJoinReceiveTrace(++_joinReceiveRequests);
+        }
         pair.requireCurrent();
+        receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.bodyRead;
         final wire = await _readJson(request);
+        receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.pairAfterBody;
         pair.requireCurrent();
+        receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.disclosureGate;
         final disclosure = wire['kind'] == 'created-jobs'
             ? companySyncDisclosure
             : null;
@@ -822,11 +838,27 @@ class NearbyController {
           throw const NearbyException('Manual Job sync is unavailable');
         }
         // Only the company layer opens ciphertext or decides membership.
-        final reply = await onJoinMessage!(pair, wire);
+        receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.callbackLookup;
+        final callback = onJoinMessage!;
+        receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.callback;
+        final reply = await callback(pair, wire);
+        receiveTrace?.lastBoundary =
+            NearbyJoinReceiveBoundary.callbackReturnedDisclosureCurrent;
         await disclosure?.requireCurrent();
+        receiveTrace?.lastBoundary =
+            NearbyJoinReceiveBoundary.pairAfterCallback;
         pair.requireCurrent();
+        receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.disclosureLive;
         disclosure?.requireLive();
+        receiveTrace?.lastBoundary = NearbyJoinReceiveBoundary.responseWrite;
         await _writeJson(request, reply);
+        if (receiveTrace != null) {
+          receiveTrace.lastBoundary = NearbyJoinReceiveBoundary.completed;
+          _observeTransportEvent(
+            onJoinReceiveObservation,
+            receiveTrace.finish(NearbyJoinReceiveOutcome.completed),
+          );
+        }
         return;
       }
       if (request.method == 'GET' && path == '/v2/hello') {
@@ -876,6 +908,12 @@ class NearbyController {
       request.response.statusCode = HttpStatus.notFound;
       await _writeJson(request, {'error': 'Unknown nearby request'});
     } catch (e) {
+      if (receiveTrace != null) {
+        _observeTransportEvent(
+          onJoinReceiveObservation,
+          receiveTrace.finish(NearbyJoinReceiveOutcome.caughtFailure),
+        );
+      }
       try {
         request.response.statusCode = HttpStatus.internalServerError;
         await _writeJson(request, {
@@ -1531,6 +1569,24 @@ class NearbyController {
     await stop(reason: NearbyTransportStopReason.disposed);
     await _stateCtrl.close();
   }
+}
+
+final class _NearbyJoinReceiveTrace {
+  _NearbyJoinReceiveTrace(this.request);
+
+  final int request;
+  final Stopwatch _clock = Stopwatch()..start();
+  NearbyJoinReceiveBoundary lastBoundary =
+      NearbyJoinReceiveBoundary.pairBeforeBody;
+
+  NearbyJoinReceiveObservation finish(NearbyJoinReceiveOutcome outcome) =>
+      NearbyJoinReceiveObservation(
+        request: request,
+        lastBoundary: lastBoundary,
+        outcome: outcome,
+        eventUtc: DateTime.now().toUtc(),
+        elapsedMicros: _clock.elapsedMicroseconds,
+      );
 }
 
 final class _NearbyRoomTrace {

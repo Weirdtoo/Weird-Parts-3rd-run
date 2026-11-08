@@ -47,23 +47,35 @@ final class JoinTestDiscovery implements NearbyDiscovery {
 
 Future<(NearbyJoinChannel, NearbyJoinChannel)> joinChannels({
   void Function(NearbyController b, NearbyController a)? onPaired,
+  NearbyTransportObserver? onReceiverTransport,
+  NearbyJoinReceiveObserver? onReceiverJoinReceive,
 }) async {
   final bd = JoinTestDiscovery();
   final ad = JoinTestDiscovery();
-  NearbyController make(String alias, JoinTestDiscovery discovery) =>
-      NearbyController(
-        deviceId: alias,
-        deviceName: alias,
-        discovery: discovery,
-        companyJoin: true,
-        bindAddress: InternetAddress.loopbackIPv4,
-        localIps: () async => ['127.0.0.1'],
-        collectPayload: () async =>
-            throw StateError('Join must not collect a shop'),
-        applyPayload: (_) async =>
-            throw StateError('Join must not replace a shop'),
-      );
-  final b = make('encounter-b', bd);
+  NearbyController make(
+    String alias,
+    JoinTestDiscovery discovery, {
+    NearbyTransportObserver? onTransport,
+    NearbyJoinReceiveObserver? onJoinReceive,
+  }) => NearbyController(
+    deviceId: alias,
+    deviceName: alias,
+    discovery: discovery,
+    companyJoin: true,
+    bindAddress: InternetAddress.loopbackIPv4,
+    localIps: () async => ['127.0.0.1'],
+    onTransportObservation: onTransport,
+    onJoinReceiveObservation: onJoinReceive,
+    collectPayload: () async =>
+        throw StateError('Join must not collect a shop'),
+    applyPayload: (_) async => throw StateError('Join must not replace a shop'),
+  );
+  final b = make(
+    'encounter-b',
+    bd,
+    onTransport: onReceiverTransport,
+    onJoinReceive: onReceiverJoinReceive,
+  );
   final a = make('encounter-a', ad);
   addTearDown(() async {
     await b.dispose();

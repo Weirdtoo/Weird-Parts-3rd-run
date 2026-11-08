@@ -12,7 +12,9 @@ import 'package:wired_parts/data/app_database.dart';
 import 'package:wired_parts/features/company/company_bootstrap.dart';
 import 'package:wired_parts/features/installation/installation_security.dart';
 import 'package:wired_parts/features/nearby/nearby_controller.dart';
+import 'package:wired_parts/features/nearby/nearby_protocol.dart';
 
+import '../../../tool/company_users_native_validation.dart';
 import 'company_join_test.dart'
     show
         JoinFixture,
@@ -227,11 +229,15 @@ initialProvisionPeers(
   CompanyEnrollment authority,
   CompanyEnrollment recipient, {
   Future<void> Function(CompanyPeerProofCheckpoint)? onSourceCheckpoint,
+  NearbyTransportObserver? onReceiverTransport,
+  NearbyJoinReceiveObserver? onReceiverJoinReceive,
 }) async {
   final sender = authority.currentCompanySession!;
   final receiver = recipient.currentCompanySession!;
   late NearbyController ac, bc;
   final (bChannel, aChannel) = await joinChannels(
+    onReceiverTransport: onReceiverTransport,
+    onReceiverJoinReceive: onReceiverJoinReceive,
     onPaired: (b, a) {
       bc = b;
       ac = a;
@@ -1438,7 +1444,39 @@ void main() {
     debugPrintSynchronously('B5 fixture Root reset saved');
     final selectedRoot = await f.aEnrollment.signInUser(a.userId, '0123');
     debugPrintSynchronously('B5 fixture A selected on both peers');
-    final peers = await initialProvisionPeers(f.aEnrollment, c.enrollment);
+    final traceDirectory = await Directory.systemTemp.createTemp(
+      'b5-receiver-transport-',
+    );
+    final transport = CompanyUserTransportReceipts(
+      directory: traceDirectory,
+      run: 'g2-users-20261108-loopback-b5',
+      role: 'receiver',
+      sourceRevision: 'a' * 40,
+      sourceTree: 'b' * 40,
+      processId: pid,
+    );
+    addTearDown(() async {
+      await transport.close();
+      await traceDirectory.delete(recursive: true);
+    });
+    final actions = <String>[];
+    final receives = <NearbyJoinReceiveObservation>[];
+    Completer<void>? observedFinish;
+    var priorReceives = 0;
+    final peers = await initialProvisionPeers(
+      f.aEnrollment,
+      c.enrollment,
+      onReceiverTransport: transport.record,
+      onReceiverJoinReceive: (event) {
+        receives.add(event);
+        transport.recordJoinReceive(event);
+        if (actions.isNotEmpty &&
+            actions.last == 'finish' &&
+            receives.length == priorReceives + actions.length) {
+          observedFinish?.complete();
+        }
+      },
+    );
     debugPrintSynchronously('B5 fixture retained membership verified');
     final sender = CompanyCreatedJobSync(
       availability: await CompanyJobSyncAvailability.open(
@@ -1464,7 +1502,6 @@ void main() {
       },
     );
     addTearDown(receiver.closeAndDrain);
-    final actions = <String>[];
     final refusals = <String>[];
     const safeRefusalMessages = {
       'Unsupported or busy Job user profile',
@@ -1513,10 +1550,26 @@ void main() {
         rethrow;
       }
     };
+    Future<int> capture(String phase) async {
+      await transport.drain();
+      final file = File(transport.filePath);
+      final rows = await file.readAsLines();
+      final bytes = await file.length();
+      expect(rows, hasLength(transport.capturedCount));
+      expect(rows.length, lessThan(CompanyUserTransportReceipts.maxRecords));
+      expect(bytes, lessThan(CompanyUserTransportReceipts.maxTotalBytes));
+      debugPrintSynchronously(
+        'B5 receiver capture $phase rows=${rows.length} bytes=$bytes',
+      );
+      return rows.length;
+    }
+
     Future<CreatedJobSyncResult> sync(String phase) async {
       actions.clear();
       refusals.clear();
       receiverTerminal = null;
+      priorReceives = receives.length;
+      final finish = observedFinish = Completer<void>();
       debugPrintSynchronously('B5 fixture $phase SyncNow started');
       final result = await sender.syncNow();
       final trace =
@@ -1538,12 +1591,25 @@ void main() {
         'start',
       ]);
       expect(actions.last, 'finish');
+      await finish.future.timeout(const Duration(seconds: 10));
+      observedFinish = null;
+      expect(receives.length - priorReceives, actions.length);
+      for (var index = priorReceives; index < receives.length; index++) {
+        final event = receives[index];
+        expect(event.request, index + 1);
+        expect(event.lastBoundary, NearbyJoinReceiveBoundary.completed);
+        expect(event.outcome, NearbyJoinReceiveOutcome.completed);
+      }
       expect(f.aEnrollment.currentCompanySession, same(selectedRoot));
       expect(c.enrollment.currentCompanySession, same(selectedC));
       return result;
     }
 
+    final baselineRows = await capture('before SyncNow');
+    expect(receives, isEmpty);
     await sync('first');
+    final firstRows = await capture('after first');
+    expect(firstRows - baselineRows, actions.length);
     final installed = (await c.enrollment.userLifecycleStatus(
       userId: b.userId,
     ))!;
@@ -1579,6 +1645,8 @@ void main() {
     debugPrintSynchronously('B5 fixture forward receipt verified');
     final repeat = await sync('repeat');
     expect((repeat.sent, repeat.received), (0, 0));
+    final repeatRows = await capture('after repeat');
+    expect(repeatRows - firstRows, actions.length);
     expect(
       (await c.db.select(c.db.companyUserEvents).get()).length,
       cEvents.length,
@@ -1608,6 +1676,36 @@ void main() {
     expect(c.store.states[aNamespace]!.revision, aBefore.revision);
     expect(initialTestCanonical(await sqlSnapshot(f.bDb)) == d1Sql, isTrue);
     expect(protectedUnchanged(f.bStore, d1Protected), isTrue);
+    await receiver.closeAndDrain();
+    await peers.bc.stop();
+    await capture('after stop');
+    final stopRows = (await File(transport.filePath).readAsLines())
+        .skip(repeatRows)
+        .map((line) => jsonDecode(line) as Map)
+        .toList();
+    expect(stopRows.map((row) => row['operation']), everyElement('room'));
+    final stopStages = stopRows.map((row) => row['stage']);
+    debugPrintSynchronously('B5 receiver stop stages=${stopStages.join(', ')}');
+    expect(stopStages.where((stage) => stage != 'listenerDone'), [
+      'stopping',
+      'stopped',
+    ]);
+    expect(
+      stopStages.where((stage) => stage == 'listenerDone').length,
+      lessThanOrEqualTo(1),
+    );
+    final stoppedIndex = stopRows.indexWhere(
+      (row) => row['stage'] == 'stopped',
+    );
+    final health = stopRows[stoppedIndex]['capture'] as Map;
+    final capturedBeforeStop = repeatRows + stoppedIndex;
+    expect(health['attemptedBeforeThisRow'], capturedBeforeStop);
+    expect(health['capturedBeforeThisRow'], capturedBeforeStop);
+    expect(health['droppedBeforeThisRow'], 0);
+    expect(
+      health['writtenBeforeThisRow'],
+      inInclusiveRange(repeatRows, capturedBeforeStop),
+    );
   }, timeout: const Timeout(Duration(minutes: 7)));
 
   test('an existing credential-one user reaches a third installation without reset', () async {
