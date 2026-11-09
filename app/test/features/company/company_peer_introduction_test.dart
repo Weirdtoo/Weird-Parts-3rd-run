@@ -537,6 +537,80 @@ void main() {
   }, timeout: const Timeout(Duration(minutes: 6)));
 
   test(
+    'issuer floor change at final roster custody read prevents disclosure',
+    () async {
+      final fixture = await JoinFixture.create();
+      final issuer = fixture.aEnrollment;
+      final recipient = fixture.bEnrollment;
+      await _activate(fixture, recipient);
+
+      final path = File.fromUri(fixture.root.uri.resolve('floor-peer.sqlite'));
+      final db = AppDatabase.forTesting(NativeDatabase(path));
+      addTearDown(db.close);
+      final installation = InstallationSecurity(
+        store: JoinActivationStore(),
+        namespace: 'synthetic.peer-roster-floor',
+      );
+      await installation.start(db);
+      final candidate = CompanyEnrollment(installation: installation, db: db);
+      await _activate(fixture, candidate);
+      final candidateSession = await candidate.signIn(_fixturePin);
+      await recipient.signIn(_fixturePin);
+
+      final store = fixture.aStore;
+      final rootNamespace = fixture.a.namespace;
+      final custody = companyCustodyNamespace(rootNamespace);
+      final priorCustody = store.states[custody]!.revision;
+      final priorRecipient = await sqlSnapshot(fixture.bDb);
+      final slot = '${fixture.b.namespace}.peer-intro-2';
+      expect(fixture.bStore.states[slot], isNull);
+      var injected = false;
+      store.beforeRead = (namespace) {
+        if (namespace != custody) return null;
+        // Select the direct disclosure custody read, including after awaits.
+        // The nested requireCurrent read must keep using the original floor.
+        final rosterFrame = StackTrace.current
+            .toString()
+            .split('\n')
+            .firstWhere(
+              (frame) => frame.contains('_CompanyPeerRoster.'),
+              orElse: () => '',
+            );
+        if (!rosterFrame.contains(
+          '_CompanyPeerRoster.requireDisclosureCurrent',
+        )) {
+          return null;
+        }
+        store.beforeRead = null;
+        injected = true;
+        return advanceJoinFloor(
+          store,
+          rootNamespace,
+          'revocation.device.${candidateSession.identity.deviceId}',
+          1,
+        );
+      };
+
+      try {
+        final result = await _sync(issuer, recipient);
+        expect(injected, isTrue, reason: 'The one-shot fault must have fired.');
+        expect(
+          fixture.bStore.states[slot],
+          isNull,
+          reason: 'A refused run must not disclose the revoked certificate.',
+        );
+        expect(result.complete, isFalse);
+      } finally {
+        store.beforeRead = null;
+      }
+      expect(store.states[custody]!.revision, priorCustody);
+      expect(await sqlSnapshot(fixture.bDb), priorRecipient);
+      expect(await _retained(recipient), [fixture.owner.identity.deviceId]);
+    },
+    timeout: const Timeout(Duration(minutes: 6)),
+  );
+
+  test(
     'manual roster pages advance past eight peers on the same Pair',
     () async {
       final fixture = await JoinFixture.create();
