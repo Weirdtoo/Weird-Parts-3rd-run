@@ -245,6 +245,7 @@ final class JoinFixture {
   final OwnerSession owner;
   OwnerDataSnapshot? _ownerData;
   Future<void>? _closing;
+  Future<void>? _issuerClosing;
   bool allowOwnerAdditions = false;
   static Future<JoinFixture> create({bool allowOwnerAdditions = false}) async {
     final root = Directory.systemTemp.createTempSync('join-durable-');
@@ -296,7 +297,10 @@ final class JoinFixture {
 
   Future<void> closeAndCheckOwnerData() => _closing ??= _close();
 
-  Future<void> _close() async {
+  Future<void> closeIssuerAndCheckOwnerData() =>
+      _issuerClosing ??= _closeIssuer();
+
+  Future<void> _closeIssuer() async {
     try {
       final ownerData = _ownerData;
       if (ownerData != null) {
@@ -318,6 +322,13 @@ final class JoinFixture {
       }
     } finally {
       await aDb.close();
+    }
+  }
+
+  Future<void> _close() async {
+    try {
+      await closeIssuerAndCheckOwnerData();
+    } finally {
       await bDb.close();
       await root.delete(recursive: true);
     }

@@ -28,11 +28,26 @@ import 'company_user_initial_provision_test.dart'
 const _fixturePin = '1234';
 const _selectedPin = '0123';
 
-Future<void> _activate(
+Future<CompanyIdentity> _activate(
   JoinFixture fixture,
   CompanyEnrollment member, {
   bool acknowledge = true,
+  int? timedSequence,
+  bool acknowledgeOverLoopback = false,
 }) async {
+  Future<T> measure<T>(String phase, Future<T> Function() action) async {
+    if (timedSequence == null) return action();
+    final clock = Stopwatch()..start();
+    try {
+      return await action();
+    } finally {
+      debugPrintSynchronously(
+        'Dense Join phase: sequence=$timedSequence, phase=$phase, '
+        'ms=${clock.elapsedMilliseconds}',
+      );
+    }
+  }
+
   late final NearbyController childController;
   late final NearbyController issuerController;
   final (childChannel, issuerChannel) = await joinChannels(
@@ -44,25 +59,77 @@ Future<void> _activate(
   try {
     final issuer = CompanyJoin(enrollment: fixture.aEnrollment);
     final child = CompanyJoin(enrollment: member);
-    final request = await issuer.receiveJoinRequest(
-      issuerChannel,
-      await child.beginJoin(childChannel),
-    );
-    final provision = await issuer.approveJoin(
-      issuerChannel,
-      request,
-      ownerSession: fixture.owner,
-    );
-    await child.acceptProvision(
-      await child.receiveProvision(childChannel, provision),
-    );
-    if (acknowledge) {
-      await issuer.acknowledgeJoin(
+    final request = await measure('request', () async {
+      return issuer.receiveJoinRequest(
         issuerChannel,
-        await child.activationAcknowledgment(childChannel),
-        ownerSession: fixture.owner,
+        await child.beginJoin(childChannel),
       );
+    });
+    final provision = await measure(
+      'approve',
+      () => issuer.approveJoin(
+        issuerChannel,
+        request,
+        ownerSession: fixture.owner,
+      ),
+    );
+    final identity = await measure('accept', () async {
+      return child.acceptProvision(
+        await child.receiveProvision(childChannel, provision),
+      );
+    });
+    if (acknowledge) {
+      final ack = await measure(
+        'prepareAck',
+        () => child.activationAcknowledgment(childChannel),
+      );
+      Future<void> acceptAck(Map<String, Object?> wire) => measure(
+        'issuerAck',
+        () => issuer.acknowledgeJoin(
+          issuerChannel,
+          wire,
+          ownerSession: fixture.owner,
+        ),
+      );
+      if (acknowledgeOverLoopback) {
+        Future<void>? issuerCallback;
+        issuerController.onJoinMessage = (_, wire) async {
+          final pending = acceptAck(wire);
+          issuerCallback = pending;
+          await pending;
+          return {'ok': true};
+        };
+        try {
+          await measure(
+            'loopbackAck',
+            () => childController.sendJoinMessage(ack),
+          );
+          debugPrintSynchronously('Dense ACK sender: outcome=accepted');
+        } catch (error) {
+          debugPrintSynchronously(
+            'Dense ACK sender: outcome=failed, type=${error.runtimeType}',
+          );
+          rethrow;
+        } finally {
+          final pending = issuerCallback;
+          if (pending == null) {
+            debugPrintSynchronously('Dense ACK handler: outcome=not-started');
+          } else {
+            try {
+              await pending;
+              debugPrintSynchronously('Dense ACK handler: outcome=accepted');
+            } catch (error) {
+              debugPrintSynchronously(
+                'Dense ACK handler: outcome=failed, type=${error.runtimeType}',
+              );
+            }
+          }
+        }
+      } else {
+        await acceptAck(ack);
+      }
     }
+    return identity;
   } finally {
     childChannel.close();
     issuerChannel.close();
@@ -136,10 +203,18 @@ Future<void> _direct(
   CompanyEnrollment left,
   CompanyEnrollment right, {
   required bool expectSuccess,
+  bool sendChallengeOverLoopback = false,
   Future<void> Function(VerifiedPeerMembership, VerifiedPeerMembership)?
   afterVerification,
 }) async {
-  final (rightChannel, leftChannel) = await joinChannels();
+  late final NearbyController responderController;
+  late final NearbyController initiatorController;
+  final (rightChannel, leftChannel) = await joinChannels(
+    onPaired: (right, left) {
+      responderController = right;
+      initiatorController = left;
+    },
+  );
   try {
     final initiator = CompanyPeerAuthentication(enrollment: left);
     final responder = CompanyPeerAuthentication(enrollment: right);
@@ -154,11 +229,29 @@ Future<void> _direct(
       target,
       session: leftSession,
     );
-    final pendingResponse = responder.receivePeerChallenge(
-      rightChannel,
-      first,
-      session: rightSession,
-    );
+    Future<Map<String, Object?>> respond(Map<String, Object?> wire) => responder
+        .receivePeerChallenge(rightChannel, wire, session: rightSession);
+    Future<Map<String, Object?>> sendChallenge() async {
+      late final Map<String, Object?> response;
+      late final int responderMillis;
+      responderController.onJoinMessage = (_, wire) async {
+        final clock = Stopwatch()..start();
+        response = await respond(wire);
+        responderMillis = clock.elapsedMilliseconds;
+        return {'ok': true};
+      };
+      final clock = Stopwatch()..start();
+      await initiatorController.sendJoinMessage(first);
+      debugPrintSynchronously(
+        'Dense direct challenge: responderMs=$responderMillis, '
+        'loopbackAckMs=${clock.elapsedMilliseconds}',
+      );
+      return response;
+    }
+
+    final pendingResponse = sendChallengeOverLoopback
+        ? sendChallenge()
+        : respond(first);
     if (!expectSuccess) {
       await expectLater(
         pendingResponse,
@@ -194,24 +287,13 @@ Future<void> _measureSlotReads(
   final accepted = fixture.bStore.states['${prefix}2']!;
   expect(accepted.bytes.length, lessThanOrEqualTo(kInstallationStateLimit));
 
-  Future<void> measure(String label) async {
-    final reads = <String>[];
-    fixture.bStore.onRead = (namespace) {
-      if (namespace.startsWith(prefix)) reads.add(namespace);
-    };
-    final clock = Stopwatch()..start();
-    try {
-      expect(await _retained(member), unorderedEquals([rootId, peerId]));
-    } finally {
-      fixture.bStore.onRead = null;
-    }
-    expect(reads, hasLength(128));
-    expect(reads.toSet(), hasLength(128));
-    debugPrintSynchronously(
-      'Peer slots $label: reads=${reads.length}, ms=${clock.elapsedMilliseconds}, '
-      'retainedRecordBytes=${accepted.bytes.length}',
-    );
-  }
+  Future<void> measure(String label) => _measureRetainedSlots(
+    label,
+    fixture.bStore,
+    member,
+    [rootId, peerId],
+    accepted.bytes.length,
+  );
 
   await measure('sparse');
   final fault = jsonDecode(utf8.decode(accepted.bytes)) as Map;
@@ -234,6 +316,35 @@ Future<void> _measureSlotReads(
       fixture.bStore.states.remove(namespace);
     }
   }
+}
+
+Future<void> _measureRetainedSlots(
+  String label,
+  JoinActivationStore store,
+  CompanyEnrollment member,
+  List<String> expected,
+  int maxRecordBytes,
+) async {
+  final prefix = '${member.installation.namespace}.peer-intro-';
+  final reads = <String>[];
+  store.onRead = (namespace) {
+    if (namespace.startsWith(prefix)) reads.add(namespace);
+  };
+  final clock = Stopwatch()..start();
+  late final List<String> retained;
+  try {
+    retained = await _retained(member);
+  } finally {
+    clock.stop();
+    store.onRead = null;
+  }
+  expect(retained, unorderedEquals(expected));
+  expect(reads, hasLength(128));
+  expect(reads.toSet(), hasLength(128));
+  debugPrintSynchronously(
+    'Peer slots $label: retained=${retained.length}, reads=${reads.length}, '
+    'ms=${clock.elapsedMilliseconds}, maxRecordBytes=$maxRecordBytes',
+  );
 }
 
 void main() {
@@ -682,5 +793,283 @@ void main() {
       });
     },
     timeout: const Timeout(Duration(minutes: 7)),
+  );
+
+  final capacityMode = Platform.environment['WP_RUN_DENSE_PEER_ROSTER'];
+  final ackProbe = capacityMode == 'ack-probe';
+  test(
+    ackProbe
+        ? 'bounded signed joins measure the production loopback activation ACK'
+        : 'full activated roster fits protected slots and cold direct verification',
+    () async {
+      const capacity = 128;
+      const pageSize = 8;
+      const ackProbeLimit = 48;
+      final fixture = await JoinFixture.create();
+      final issuer = fixture.aEnrollment;
+      final dense = fixture.bEnrollment;
+      final enrollmentClock = Stopwatch()..start();
+      final denseIdentity = await _activate(fixture, dense);
+      final otherDeviceIds = <String>[];
+
+      Future<int> ackCount() async {
+        final rows = await fixture.aDb
+            .customSelect(
+              "SELECT COUNT(*) AS count FROM company_join_events WHERE ordinal = 9 AND kind = 'ack'",
+            )
+            .getSingle();
+        return rows.read<int>('count');
+      }
+
+      final lastSequence = ackProbe ? ackProbeLimit : capacity - 1;
+      for (var sequence = 2; sequence <= lastSequence; sequence++) {
+        final path = File.fromUri(
+          fixture.root.uri.resolve('dense-$sequence.sqlite'),
+        );
+        final db = AppDatabase.forTesting(NativeDatabase(path));
+        try {
+          final installation = InstallationSecurity(
+            store: JoinActivationStore(),
+            namespace: 'synthetic.peer-roster-dense-$sequence',
+          );
+          await installation.start(db);
+          final identity = await _activate(
+            fixture,
+            CompanyEnrollment(installation: installation, db: db),
+            timedSequence: sequence % 16 == 0 ? sequence : null,
+            acknowledgeOverLoopback: ackProbe && sequence == ackProbeLimit,
+          );
+          otherDeviceIds.add(identity.deviceId);
+        } finally {
+          await db.close();
+          if (ackProbe && sequence == ackProbeLimit) {
+            try {
+              debugPrintSynchronously(
+                'Dense ACK ledger: sequence=$sequence, count=${await ackCount()}',
+              );
+            } catch (error) {
+              debugPrintSynchronously(
+                'Dense ACK ledger: outcome=read-failed, type=${error.runtimeType}',
+              );
+            }
+          }
+        }
+        if (sequence % 16 == 0) {
+          debugPrintSynchronously(
+            'Dense roster activation: count=$sequence, '
+            'ms=${enrollmentClock.elapsedMilliseconds}',
+          );
+        }
+      }
+      if (ackProbe) {
+        expect(await ackCount(), ackProbeLimit);
+        return;
+      }
+
+      final sparseFile = File.fromUri(
+        fixture.root.uri.resolve('dense-sparse.sqlite'),
+      );
+      final sparseStore = JoinActivationStore();
+      const sparseNamespace = 'synthetic.peer-roster-dense-sparse';
+      var sparseDb = AppDatabase.forTesting(NativeDatabase(sparseFile));
+      addTearDown(() => sparseDb.close());
+      Future<CompanyEnrollment> openSparse() async {
+        final installation = InstallationSecurity(
+          store: sparseStore,
+          namespace: sparseNamespace,
+        );
+        await installation.start(sparseDb);
+        return CompanyEnrollment(installation: installation, db: sparseDb);
+      }
+
+      var sparse = await openSparse();
+      final sparseIdentity = await _activate(fixture, sparse);
+      otherDeviceIds.add(sparseIdentity.deviceId);
+      debugPrintSynchronously(
+        'Dense roster activation: count=$capacity, '
+        'ms=${enrollmentClock.elapsedMilliseconds}',
+      );
+
+      expect(await ackCount(), capacity);
+      final beforeIssuer = jsonEncode(await sqlSnapshot(fixture.aDb));
+      final beforeIssuerProtected = Map.of(fixture.aStore.states);
+      final excessDb = AppDatabase.forTesting(
+        NativeDatabase(
+          File.fromUri(fixture.root.uri.resolve('dense-excess.sqlite')),
+        ),
+      );
+      addTearDown(excessDb.close);
+      final excessStore = JoinActivationStore();
+      final excessInstallation = InstallationSecurity(
+        store: excessStore,
+        namespace: 'synthetic.peer-roster-dense-excess',
+      );
+      await excessInstallation.start(excessDb);
+      final beforeExcess = jsonEncode(await sqlSnapshot(excessDb));
+      final beforeExcessProtected = Map.of(excessStore.states);
+      await expectLater(
+        _activate(
+          fixture,
+          CompanyEnrollment(installation: excessInstallation, db: excessDb),
+        ),
+        throwsA(
+          isA<CompanyBootstrapRefusal>().having(
+            (error) => error.message,
+            'message',
+            'Enrollment capacity reached',
+          ),
+        ),
+      );
+      expect(
+        jsonEncode(await sqlSnapshot(fixture.aDb)) == beforeIssuer,
+        isTrue,
+        reason: 'Issuer SQL state must remain unchanged when at capacity.',
+      );
+      expect(fixture.aStore.states, beforeIssuerProtected);
+      expect(
+        jsonEncode(await sqlSnapshot(excessDb)) == beforeExcess,
+        isTrue,
+        reason: 'Excess SQL state must remain unchanged when at capacity.',
+      );
+      expect(excessStore.states, beforeExcessProtected);
+
+      await dense.signIn(_fixturePin);
+      await sparse.signIn(_fixturePin);
+      final crew = await issuer.createRestrictedUser(
+        owner: fixture.owner,
+        requestId: const Uuid().v4(),
+        name: 'Crew',
+        pin: _selectedPin,
+      );
+      await provisionInitialUser(issuer, dense, crew.userId);
+      await provisionInitialUser(issuer, sparse, crew.userId);
+      await issuer.signInUser(crew.userId, _selectedPin);
+      await dense.signInUser(crew.userId, _selectedPin);
+      await sparse.signInUser(crew.userId, _selectedPin);
+
+      Map<int, ProtectedInstallationState> slots(
+        JoinActivationStore store,
+        String namespace,
+      ) {
+        final prefix = '$namespace.peer-intro-';
+        return {
+          for (final row in store.states.entries)
+            if (row.key.startsWith(prefix))
+              int.parse(row.key.substring(prefix.length)): row.value,
+        };
+      }
+
+      int maxBytes(Map<int, ProtectedInstallationState> records) => records
+          .values
+          .map((record) => record.bytes.length)
+          .reduce((a, b) => a > b ? a : b);
+
+      final rootId = fixture.owner.identity.deviceId;
+      final sparseResult = await _sync(issuer, sparse);
+      expect(sparseResult.complete, isTrue, reason: sparseResult.message);
+      expect(sparseResult.peerRosterMore, isTrue);
+      final sparseRecords = slots(sparseStore, sparseNamespace);
+      expect(
+        sparseRecords.keys,
+        unorderedEquals(List.generate(pageSize, (i) => i + 1)),
+      );
+      await _measureRetainedSlots('valid sparse', sparseStore, sparse, [
+        rootId,
+        denseIdentity.deviceId,
+        ...otherDeviceIds.take(7),
+      ], maxBytes(sparseRecords));
+
+      final issuerJob =
+          (await fixture.aDb.select(fixture.aDb.companyJobs).get()).single;
+      final denseClock = Stopwatch()..start();
+      var retained = 0;
+      var pageCount = 0;
+      // A Pair has a finite authenticated frame budget. Use fresh Pairs
+      // between batches and resume from the persisted roster checkpoint.
+      const pagesPerPair = 4;
+      const expectedPages = 16;
+      for (var batch = 0; batch < expectedPages ~/ pagesPerPair; batch++) {
+        await _withSync(issuer, dense, (sync) async {
+          for (var page = 0; page < pagesPerPair; page++) {
+            final result = await sync.syncNow();
+            expect(result.complete, isTrue, reason: result.message);
+            pageCount++;
+            retained += pageCount < expectedPages ? pageSize : pageSize - 1;
+            expect(result.peerRosterMore, pageCount < expectedPages);
+            expect([
+              result.sent,
+              result.received,
+            ], pageCount == 1 ? [1, 0] : [0, 0]);
+            if (pageCount == 1) {
+              final delivered =
+                  (await dense.db.select(dense.db.companyJobs).get()).single;
+              expect(delivered.jobId, issuerJob.jobId);
+              expect(
+                delivered.operationBytes == issuerJob.operationBytes,
+                isTrue,
+                reason: 'The received original Job must retain its signed attribution.',
+              );
+            }
+            expect(
+              slots(fixture.bStore, fixture.b.namespace).keys,
+              unorderedEquals(List.generate(retained, (i) => i + 2)),
+            );
+            debugPrintSynchronously(
+              'Dense roster page: page=$pageCount, retained=$retained, '
+              'ms=${denseClock.elapsedMilliseconds}',
+            );
+          }
+        });
+      }
+      expect(pageCount, expectedPages);
+      final records = slots(fixture.bStore, fixture.b.namespace);
+      expect(records, hasLength(capacity - 1));
+      expect(maxBytes(records), lessThanOrEqualTo(kInstallationStateLimit));
+      final repeat = await _sync(issuer, dense);
+      expect(repeat.complete, isTrue, reason: repeat.message);
+      expect(repeat.peerRosterMore, isFalse);
+      expect([repeat.sent, repeat.received], [0, 0]);
+      expect(slots(fixture.bStore, fixture.b.namespace), records);
+
+      await issuer.signOut();
+      await fixture.closeIssuerAndCheckOwnerData();
+      await fixture.reopenB();
+      await sparse.signOut();
+      await sparseDb.close();
+      sparseDb = AppDatabase.forTesting(NativeDatabase(sparseFile));
+      sparse = await openSparse();
+      final reopenedDense = await fixture.bEnrollment.signInUser(
+        crew.userId,
+        _selectedPin,
+      );
+      final reopenedSparse = await sparse.signInUser(crew.userId, _selectedPin);
+      expect(reopenedDense.identity.deviceId, denseIdentity.deviceId);
+      expect(reopenedSparse.identity.deviceId, sparseIdentity.deviceId);
+      for (final session in [reopenedDense, reopenedSparse]) {
+        expect(session.identity.userId, crew.userId);
+        expect(session.identity.isAuthorityOwner, isFalse);
+      }
+      expect(issuer.currentCompanySession, isNull);
+      await _measureRetainedSlots(
+        'valid dense',
+        fixture.bStore,
+        fixture.bEnrollment,
+        [rootId, ...otherDeviceIds],
+        maxBytes(records),
+      );
+
+      final directClock = Stopwatch()..start();
+      await _direct(
+        sparse,
+        fixture.bEnrollment,
+        expectSuccess: true,
+        sendChallengeOverLoopback: true,
+      );
+      debugPrintSynchronously(
+        'Dense cold direct Pair and proof: ms=${directClock.elapsedMilliseconds}',
+      );
+    },
+    skip: capacityMode == '1' || ackProbe ? false : 'Set WP_RUN_DENSE_PEER_ROSTER=1 or ack-probe to run the capacity test',
+    timeout: Timeout(Duration(minutes: ackProbe ? 20 : 45)),
   );
 }
