@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 
+import 'company_peer_native_driver_control.dart';
 import 'native_nearby_test_crypto.dart';
 
 const nativeTestMaxCommandBytes = 16384;
@@ -21,6 +22,7 @@ enum NativeTestAction {
   jobNameUi,
   jobDetailsUi,
   jobLifecycleUi,
+  companyPeerUi,
 }
 
 enum NativeJobLifecycleUiStep {
@@ -107,6 +109,7 @@ final class NativeTestCommand {
     this.jobNameStep,
     this.jobDetailsStep,
     this.jobLifecycleStep,
+    this.companyPeerArgument,
   });
 
   final String epoch, commandId, contentHash;
@@ -119,6 +122,7 @@ final class NativeTestCommand {
   final NativeJobNameUiStep? jobNameStep;
   final NativeJobDetailsUiStep? jobDetailsStep;
   final NativeJobLifecycleUiStep? jobLifecycleStep;
+  final CompanyPeerDriverArgument? companyPeerArgument;
 
   static NativeTestCommand parseRequest(String source, TestSession session) {
     try {
@@ -148,11 +152,14 @@ final class NativeTestCommand {
     NativeJobNameUiStep? jobNameStep,
     NativeJobDetailsUiStep? jobDetailsStep,
     NativeJobLifecycleUiStep? jobLifecycleStep,
+    CompanyPeerDriverArgument? companyPeerArgument,
   }) {
     if ((jobNameStep != null && action != NativeTestAction.jobNameUi) ||
         (jobDetailsStep != null && action != NativeTestAction.jobDetailsUi) ||
         (jobLifecycleStep != null &&
-            action != NativeTestAction.jobLifecycleUi)) {
+            action != NativeTestAction.jobLifecycleUi) ||
+        (companyPeerArgument != null &&
+            action != NativeTestAction.companyPeerUi)) {
       _reject(NativeTestCommandError.invalidRequest);
     }
     final arguments = <String, Object>{
@@ -163,6 +170,8 @@ final class NativeTestCommand {
       if (jobNameStep != null) 'step': jobNameStep.name,
       if (jobDetailsStep != null) 'step': jobDetailsStep.name,
       if (jobLifecycleStep != null) 'step': jobLifecycleStep.name,
+      if (companyPeerArgument != null)
+        'candidate': companyPeerArgument.toJson(),
     };
     final request = <String, Object>{
       'epoch': session.epoch,
@@ -613,6 +622,7 @@ NativeTestCommand _parseCommand(String source, TestSession session) {
   NativeJobNameUiStep? jobNameStep;
   NativeJobDetailsUiStep? jobDetailsStep;
   NativeJobLifecycleUiStep? jobLifecycleStep;
+  CompanyPeerDriverArgument? companyPeerArgument;
   final arguments = m['arguments'];
   if (kind == NativeTestAction.observe &&
       arguments is Map<String, dynamic> &&
@@ -653,6 +663,12 @@ NativeTestCommand _parseCommand(String source, TestSession session) {
     );
     if (steps.length != 1) _reject(NativeTestCommandError.invalidRequest);
     jobLifecycleStep = steps.single;
+  } else if (kind == NativeTestAction.companyPeerUi) {
+    final a = nativeTestMap(arguments, {'candidate'});
+    companyPeerArgument = CompanyPeerDriverArgument.parse(
+      a['candidate'],
+      session,
+    );
   } else {
     nativeTestMap(arguments, {});
   }
@@ -670,5 +686,6 @@ NativeTestCommand _parseCommand(String source, TestSession session) {
     jobNameStep: jobNameStep,
     jobDetailsStep: jobDetailsStep,
     jobLifecycleStep: jobLifecycleStep,
+    companyPeerArgument: companyPeerArgument,
   );
 }

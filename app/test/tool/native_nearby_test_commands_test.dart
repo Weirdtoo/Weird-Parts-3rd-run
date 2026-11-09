@@ -405,6 +405,13 @@ void main() {
     () {
       for (final action in NativeTestAction.values) {
         final f = Fixture();
+        if (action == NativeTestAction.companyPeerUi) {
+          expect(
+            () => f.request(1, action: action),
+            throwsA(isA<NativeTestFailure>()),
+          );
+          continue;
+        }
         final request = f.request(
           1,
           action: action,

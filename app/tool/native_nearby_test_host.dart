@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'company_peer_native_driver_control.dart';
 import 'native_nearby_test_commands.dart';
 import 'native_nearby_test_crypto.dart';
 import 'native_nearby_test_output.dart';
@@ -10,6 +11,7 @@ import 'native_nearby_test_rpc.dart';
 const nativeTestSupportedRuns = {
   'nearby-lifecycle-20261007a',
   'nearby-resident-probe-20261009a',
+  companyPeerDriverRun,
 };
 const _maxHostBytes = 65536;
 const _maxDiscoveryVmBytes = 1048576;
@@ -203,7 +205,8 @@ final class NativeTestHost {
       _reject(NativeTestHostError.invalidInput);
     }
     if (!nativeTestSupportedRuns.contains(run) ||
-        (platform != 'windows' && platform != 'macos')) {
+        (platform != 'windows' && platform != 'macos') ||
+        (run == companyPeerDriverRun && platform != 'windows')) {
       _reject(NativeTestHostError.invalidInput);
     }
   }
@@ -224,8 +227,9 @@ final class NativeTestHost {
   TestRole get role =>
       platform == 'windows' ? TestRole.receiver : TestRole.sender;
   String get deviceId => 'lan-$run-${role.name}';
-  String get peerId =>
-      'lan-$run-${role == TestRole.sender ? 'receiver' : 'sender'}';
+  String get peerId => run == companyPeerDriverRun
+      ? companyPeerDriverOperator
+      : 'lan-$run-${role == TestRole.sender ? 'receiver' : 'sender'}';
 
   Future<bool> discover() async {
     final vm = await transport.getVm();
@@ -511,6 +515,7 @@ final class NativeTestHost {
       'sameNearbyState',
       'discovered',
       'codePresent',
+      if (run == companyPeerDriverRun) ...{'candidateInputKey', 'candidateUi'},
     });
     if (m['version'] != 1 ||
         m['outcome'] != 'ready' ||
@@ -539,6 +544,12 @@ final class NativeTestHost {
       'sameNearbyState': _boolean(m['sameNearbyState']),
       'discovered': _boolean(m['discovered']),
       'codePresent': _boolean(m['codePresent']),
+      if (run == companyPeerDriverRun) ...{
+        'candidateInputKey': base64Url.encode(
+          nativeTestBytes(m['candidateInputKey'], 32),
+        ),
+        'candidateUi': companyPeerDriverUi(m['candidateUi']),
+      },
     };
   }
 
@@ -1091,7 +1102,8 @@ Future<void> _runHost(List<String> arguments) async {
         : Platform.isMacOS
         ? 'macos'
         : null;
-    if (platform == null) {
+    final candidate = run == companyPeerDriverRun;
+    if (platform == null || (candidate && platform != 'windows')) {
       _reject(NativeTestHostError.unsupportedHost);
     }
     final role = platform == 'windows' ? 'receiver' : 'sender';
@@ -1100,10 +1112,41 @@ Future<void> _runHost(List<String> arguments) async {
       '${cache.path}${Platform.pathSeparator}flutter_tools.snapshot',
     );
     final app = File(Platform.script.toFilePath()).parent.parent;
-    if (!snapshot.existsSync() ||
-        !File('${app.path}/integration_test/nearby_resident_test.dart')
-            .existsSync()) {
+    final target = candidate
+        ? 'integration_test/company_peer_native_driver_test.dart'
+        : 'integration_test/nearby_resident_test.dart';
+    if (!snapshot.existsSync() || !File('${app.path}/$target').existsSync()) {
       _reject(NativeTestHostError.launcherFailed);
+    }
+    Future<String> sourceRef(String ref) async {
+      final result = await Process.run('git', [
+        'rev-parse',
+        ref,
+      ], workingDirectory: app.path);
+      final value = (result.stdout as String).trim();
+      if (result.exitCode != 0 || !RegExp(r'^[a-f0-9]{40}$').hasMatch(value)) {
+        _reject(NativeTestHostError.launcherFailed);
+      }
+      return value;
+    }
+
+    if (candidate) {
+      final diff = await Process.run('git', [
+        'diff',
+        '--quiet',
+        'HEAD',
+        '--',
+      ], workingDirectory: app.path);
+      final extras = await Process.run('git', [
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+      ], workingDirectory: app.path);
+      if (diff.exitCode != 0 ||
+          extras.exitCode != 0 ||
+          (extras.stdout as String).trim().isNotEmpty) {
+        _reject(NativeTestHostError.launcherFailed);
+      }
     }
     final launcherDiagnostics = NativeTestLauncherDiagnostics(
       onConfigureDiagnostic: (record) =>
@@ -1119,10 +1162,15 @@ Future<void> _runHost(List<String> arguments) async {
         '--verbose',
         '--reporter',
         'expanded',
-        'integration_test/nearby_resident_test.dart',
+        target,
         '-d',
         platform,
-        '--dart-define=NATIVE_NEARBY_TEST_MODE=true',
+        if (candidate) ...[
+          '--dart-define=NATIVE_COMPANY_PEER_DRIVER=true',
+          '--dart-define=COMPANY_USER_SOURCE_REVISION=${await sourceRef('HEAD')}',
+          '--dart-define=COMPANY_USER_SOURCE_TREE=${await sourceRef('HEAD^{tree}')}',
+        ] else
+          '--dart-define=NATIVE_NEARBY_TEST_MODE=true',
         '--dart-define=LAN_VALIDATION_RUN=$run',
         '--dart-define=LAN_VALIDATION_ROLE=$role',
       ],

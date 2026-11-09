@@ -98,10 +98,12 @@ final class NativeTestResidentViewInfo {
     required this.discovered,
     required this.codePresent,
     this.allowedActions = const {},
+    this.candidateUi,
   });
   final NativeTestPhase phase;
   final bool sameNearbyState, discovered, codePresent;
   final Set<NativeTestAction> allowedActions;
+  final Map<String, Object?>? candidateUi;
 }
 
 final class NativeTestResidentRpc {
@@ -114,6 +116,7 @@ final class NativeTestResidentRpc {
     required this.clockMillis,
     required this.readInfoInLoop,
     this.onDiagnostic,
+    this.candidateInputKey,
   });
 
   final int appPid;
@@ -122,6 +125,7 @@ final class NativeTestResidentRpc {
   final int Function() clockMillis;
   final NativeTestResidentViewInfo Function() readInfoInLoop;
   final void Function(NativeTestConfigureDiagnostic)? onDiagnostic;
+  final String? candidateInputKey;
   NativeTestResidentViewInfo? _published;
   Set<NativeTestAction> _publishedAllowedActions = const {};
   Set<NativeTestAction> get allowedActions => _publishedAllowedActions;
@@ -181,6 +185,8 @@ final class NativeTestResidentRpc {
       'sameNearbyState': current.sameNearbyState,
       'discovered': current.discovered,
       'codePresent': current.codePresent,
+      'candidateInputKey': ?candidateInputKey,
+      'candidateUi': ?current.candidateUi,
     };
   }
 
