@@ -888,6 +888,21 @@ final class _DiagnosticNearbyController extends NearbyController {
   }
 }
 
+bool companyUserValidationHostAllowed({
+  required String operatingSystem,
+  required String roleName,
+  required String run,
+  required bool disabledApiProbe,
+  required bool networkDiagnostic,
+}) => switch ((operatingSystem, roleName)) {
+  ('windows', 'sender') || ('macos', 'receiver') => true,
+  ('windows', 'receiver') =>
+    run == 'g2-users-20261109-peer-member-win' &&
+        !disabledApiProbe &&
+        !networkDiagnostic,
+  _ => false,
+};
+
 ValidationRole _validateStartupArguments() {
   final runMatch = RegExp(r'^g2-users-(\d{8})-([a-z0-9][a-z0-9-]{0,29})$')
       .firstMatch(_run);
@@ -908,8 +923,13 @@ ValidationRole _validateStartupArguments() {
       !{'sender', 'receiver'}.contains(_roleName)) {
     throw StateError('company-user-validation-arguments-refused');
   }
-  if ((_roleName == 'sender' && !Platform.isWindows) ||
-      (_roleName == 'receiver' && !Platform.isMacOS)) {
+  if (!companyUserValidationHostAllowed(
+    operatingSystem: Platform.operatingSystem,
+    roleName: _roleName,
+    run: _run,
+    disabledApiProbe: _disabledApiProbe,
+    networkDiagnostic: _networkDiagnostic,
+  )) {
     throw StateError('company-user-validation-host-refused');
   }
   return _roleName == 'sender'
