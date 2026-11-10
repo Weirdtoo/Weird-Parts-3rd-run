@@ -28,13 +28,26 @@ import 'company_user_initial_provision_test.dart'
 const _fixturePin = '1234';
 const _selectedPin = '0123';
 
+Future<OwnerSession> _ownerForNextPair(
+  CompanyEnrollment issuer,
+  OwnerSession owner,
+) async {
+  // Leave one complete Pair window for the approval and acknowledgment.
+  if (owner.isValid && owner.timeUntilExpiry >= const Duration(minutes: 5)) {
+    return owner;
+  }
+  return issuer.signIn(_fixturePin);
+}
+
 Future<CompanyIdentity> _activate(
   JoinFixture fixture,
   CompanyEnrollment member, {
   bool acknowledge = true,
   int? timedSequence,
   bool acknowledgeOverLoopback = false,
+  OwnerSession? ownerSession,
 }) async {
+  final approver = ownerSession ?? fixture.owner;
   Future<T> measure<T>(String phase, Future<T> Function() action) async {
     if (timedSequence == null) return action();
     final clock = Stopwatch()..start();
@@ -67,11 +80,7 @@ Future<CompanyIdentity> _activate(
     });
     final provision = await measure(
       'approve',
-      () => issuer.approveJoin(
-        issuerChannel,
-        request,
-        ownerSession: fixture.owner,
-      ),
+      () => issuer.approveJoin(issuerChannel, request, ownerSession: approver),
     );
     final identity = await measure('accept', () async {
       return child.acceptProvision(
@@ -85,11 +94,8 @@ Future<CompanyIdentity> _activate(
       );
       Future<void> acceptAck(Map<String, Object?> wire) => measure(
         'issuerAck',
-        () => issuer.acknowledgeJoin(
-          issuerChannel,
-          wire,
-          ownerSession: fixture.owner,
-        ),
+        () =>
+            issuer.acknowledgeJoin(issuerChannel, wire, ownerSession: approver),
       );
       if (acknowledgeOverLoopback) {
         Future<void>? issuerCallback;
@@ -795,6 +801,24 @@ void main() {
     timeout: const Timeout(Duration(minutes: 7)),
   );
 
+  test('a fresh issuer session can acknowledge a later enrollment', () async {
+    final fixture = await JoinFixture.create();
+    final issuer = fixture.aEnrollment;
+    await issuer.signOut();
+    expect(fixture.owner.isValid, isFalse);
+
+    final owner = await _ownerForNextPair(issuer, fixture.owner);
+    expect(owner, isNot(same(fixture.owner)));
+    await _activate(fixture, fixture.bEnrollment, ownerSession: owner);
+
+    final ack = await fixture.aDb
+        .customSelect(
+          "SELECT COUNT(*) AS count FROM company_join_events WHERE ordinal = 9 AND kind = 'ack'",
+        )
+        .getSingle();
+    expect(ack.read<int>('count'), 1);
+  });
+
   final capacityMode = Platform.environment['WP_RUN_DENSE_PEER_ROSTER'];
   final ackProbe = capacityMode == 'ack-probe';
   test(
@@ -808,8 +832,18 @@ void main() {
       final fixture = await JoinFixture.create();
       final issuer = fixture.aEnrollment;
       final dense = fixture.bEnrollment;
+      var owner = fixture.owner;
+      Future<OwnerSession> liveOwner() async {
+        owner = await _ownerForNextPair(issuer, owner);
+        return owner;
+      }
+
       final enrollmentClock = Stopwatch()..start();
-      final denseIdentity = await _activate(fixture, dense);
+      final denseIdentity = await _activate(
+        fixture,
+        dense,
+        ownerSession: await liveOwner(),
+      );
       final otherDeviceIds = <String>[];
 
       Future<int> ackCount() async {
@@ -838,6 +872,7 @@ void main() {
             CompanyEnrollment(installation: installation, db: db),
             timedSequence: sequence % 16 == 0 ? sequence : null,
             acknowledgeOverLoopback: ackProbe && sequence == ackProbeLimit,
+            ownerSession: await liveOwner(),
           );
           otherDeviceIds.add(identity.deviceId);
         } finally {
@@ -883,7 +918,11 @@ void main() {
       }
 
       var sparse = await openSparse();
-      final sparseIdentity = await _activate(fixture, sparse);
+      final sparseIdentity = await _activate(
+        fixture,
+        sparse,
+        ownerSession: await liveOwner(),
+      );
       otherDeviceIds.add(sparseIdentity.deviceId);
       debugPrintSynchronously(
         'Dense roster activation: count=$capacity, '
@@ -891,6 +930,7 @@ void main() {
       );
 
       expect(await ackCount(), capacity);
+      final excessOwner = await liveOwner();
       final beforeIssuer = jsonEncode(await sqlSnapshot(fixture.aDb));
       final beforeIssuerProtected = Map.of(fixture.aStore.states);
       final excessDb = AppDatabase.forTesting(
@@ -911,6 +951,7 @@ void main() {
         _activate(
           fixture,
           CompanyEnrollment(installation: excessInstallation, db: excessDb),
+          ownerSession: excessOwner,
         ),
         throwsA(
           isA<CompanyBootstrapRefusal>().having(
@@ -936,7 +977,7 @@ void main() {
       await dense.signIn(_fixturePin);
       await sparse.signIn(_fixturePin);
       final crew = await issuer.createRestrictedUser(
-        owner: fixture.owner,
+        owner: await liveOwner(),
         requestId: const Uuid().v4(),
         name: 'Crew',
         pin: _selectedPin,
