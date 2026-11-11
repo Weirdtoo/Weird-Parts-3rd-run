@@ -486,6 +486,7 @@ final class CompanyPeerAuthentication {
     );
     final custody = await enrollment._readCustody();
     _IntroducedPeer? introduced;
+    String? issuerLedger;
     final ResolvedCompanyMembership peer;
     if (custody?.isMember == true) {
       final authority = await _membershipAuthority(enrollment.db, trust);
@@ -511,15 +512,41 @@ final class CompanyPeerAuthentication {
         throw const CompanyBootstrapRefusal('Retained peer context changed');
       }
     } else {
-      final peers = await _retainedPeers(owner, validateSelected: false);
-      peer = peers
-          .singleWhere(
-            (candidate) => _samePeerMembership(
-              candidate._membership,
-              selected._membership,
-            ),
-          )
-          ._membership;
+      final pins = custody?.values['enrollment'];
+      if (custody == null ||
+          custody.isMember ||
+          custody.status != 'active' ||
+          pins is! Map ||
+          pins['pending'] != null ||
+          pins['ledger'] is! String) {
+        throw const CompanyBootstrapRefusal('Issuer peer ledger unavailable');
+      }
+      issuerLedger = pins['ledger'] as String;
+      // readCompanyTrust reconciled the whole issuer ledger above. Resolve
+      // this peer from it, then recheck the commitment after all proof awaits.
+      final certificate =
+          await (enrollment.db.select(
+                enrollment.db.companyMembershipCertificates,
+              )..where(
+                (row) =>
+                    row.companyId.equals(trust.companyId.value) &
+                    row.issuerDeviceId.equals(custody.device) &
+                    row.proofCommitment.equals(
+                        selected._membership.proofCommitment,
+                    ),
+              ))
+              .getSingle();
+      peer = await _resolveMemberCertificate(
+        certificate.proofBytes,
+        await _membershipAuthority(enrollment.db, trust),
+        trust,
+        const {},
+      );
+      _memberFloors(peer.user, peer.device, trust, floors);
+      if (!_samePeerMembership(peer, selected._membership) ||
+          peer.device['id'] == local.device['id']) {
+        throw const CompanyBootstrapRefusal('Retained issuer peer changed');
+      }
     }
     owner.validateCommand(
       company: trust.companyId.value,
@@ -558,6 +585,16 @@ final class CompanyPeerAuthentication {
     );
     await onProofCheckpoint?.call(CompanyPeerProofCheckpoint.afterExporter);
     await enrollment._requireSyncSessionAccount(owner);
+    if (issuerLedger != null) {
+      final finalCustody = await enrollment._readCustody();
+      if (finalCustody?.revision != custody?.revision ||
+          !listEquals(finalCustody?.encode(), custody?.encode()) ||
+          await _issuerLedgerWitness(enrollment.db) != issuerLedger) {
+        throw const CompanyBootstrapRefusal(
+          'Peer issuer ledger changed during proof preparation',
+        );
+      }
+    }
     final current = await installation.store.readState(installation.namespace);
     final currentRecord = current == null
         ? null

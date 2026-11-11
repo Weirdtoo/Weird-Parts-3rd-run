@@ -1038,6 +1038,35 @@ void main() {
     }
   });
 
+  test('issuer peer proof refuses a ledger changed after exporter', () async {
+    final f = await JoinFixture.create();
+    await activateFixtureB(f);
+    final owner = await f.aEnrollment.signIn('1234');
+    final recipient = await f.bEnrollment.signIn('1234');
+    final auth = CompanyPeerAuthentication(
+      enrollment: f.aEnrollment,
+      onProofCheckpoint: (_) async {
+        final changed = await f.aDb.customUpdate(
+          "UPDATE company_join_events SET evidence_bytes = '{}' WHERE ordinal = 1",
+        );
+        expect(changed, 1);
+      },
+    );
+    final selected = (await auth.retainedPeers(session: owner))
+        .singleWhere((peer) => peer.deviceId == recipient.identity.deviceId);
+    final (_, channel) = await joinChannels();
+    await expectLater(
+      auth.beginPeerChallenge(channel, selected, session: owner),
+      throwsA(
+        isA<CompanyBootstrapRefusal>().having(
+          (error) => error.message,
+          'message',
+          'Peer issuer ledger changed during proof preparation',
+        ),
+      ),
+    );
+  });
+
   test('issuer revocation learned in approval hook rolls all SQL back and returns no provision', () async {
     final f = await JoinFixture.create();
     final before = await sqlSnapshot(f.aDb);
