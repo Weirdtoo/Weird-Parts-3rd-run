@@ -6,6 +6,8 @@ import 'dart:typed_data';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wired_parts/data/app_database.dart';
+import 'package:wired_parts/features/company/company_bootstrap.dart'
+    show CompanyBootstrapRefusal;
 import 'package:wired_parts/features/installation/installation_security.dart';
 import 'package:wired_parts/features/nearby/nearby_controller.dart';
 import 'package:wired_parts/features/nearby/nearby_discovery.dart';
@@ -1065,6 +1067,45 @@ void main() {
     ) as Map;
     expect(custody['enrollment']['pending'], isNull);
   });
+
+  test(
+    'issuer refuses a protected record changed after reconciliation',
+    () async {
+      final f = await JoinFixture.create();
+      final before = await sqlSnapshot(f.aDb);
+      final revocation = 'revocation.device.${f.owner.identity.deviceId}';
+      var armed = false;
+      var reads = 0;
+      f.aStore.beforeRead = (namespace) {
+        if (!armed || namespace != f.a.namespace || ++reads != 5) return null;
+        // The two binding checks each read the installation twice. Change it
+        // on the guard's fresh read after it resolves membership.
+        return advanceJoinFloor(f.aStore, f.a.namespace, revocation, 1);
+      };
+      final issuer = CompanyJoin(
+        enrollment: f.aEnrollment,
+        beforeCommit: () async => armed = true,
+      );
+      final recipient = CompanyJoin(enrollment: f.bEnrollment);
+      final (bc, ac) = await joinChannels();
+      final request = await issuer.receiveJoinRequest(
+        ac,
+        await recipient.beginJoin(bc),
+      );
+      await expectLater(
+        issuer.approveJoin(ac, request, ownerSession: f.owner),
+        throwsA(
+          isA<CompanyBootstrapRefusal>().having(
+            (error) => error.message,
+            'message',
+            'Live authorized approver changed',
+          ),
+        ),
+      );
+      expect(await sqlSnapshot(f.aDb), before);
+      expect(f.a.knownSecurityFloors[revocation], 1);
+    },
+  );
 
   test('fresh protected floor before B consent denies without SQL or protected changes', () async {
     final f = await JoinFixture.create();

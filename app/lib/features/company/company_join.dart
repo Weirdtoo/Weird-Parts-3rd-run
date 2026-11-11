@@ -19,6 +19,10 @@ Future<void> _requireLiveEnroller(
   NearbyJoinChannel channel,
 ) async {
   channel._requireLive();
+  final db = enrollment.db;
+  if (!db.hasCallerTransaction) {
+    throw const CompanyBootstrapRefusal('Issuer transaction required');
+  }
   final custody = await enrollment._readCustody();
   if (custody == null ||
       custody.isMember ||
@@ -26,13 +30,33 @@ Future<void> _requireLiveEnroller(
       !identical(enrollment.currentSession, session)) {
     throw const CompanyBootstrapRefusal('Live authorized approver required');
   }
+  // The writer transaction keeps the reconciled SQL ledger stable while
+  // resolving membership. Protected records still need a fresh read.
   await enrollment._checkBinding(custody, requireActive: true);
   final installation = enrollment.installation;
-  final trust = (await installation.readCompanyTrust(enrollment.db))!;
-  final member = await resolveCompanyMembership(
-    db: enrollment.db,
+  final persisted = installation._persisted;
+  final trust = installation._record?.companyTrust;
+  if (persisted == null || trust == null) {
+    throw const CompanyBootstrapRefusal('Company trust unavailable');
+  }
+  final member = await _resolveCompanyMembership(
+    db: db,
     installation: installation,
+    trust: trust,
   );
+  final currentCustody = await enrollment._readCustody();
+  final current = await installation.store.readState(installation.namespace);
+  if (currentCustody == null ||
+      currentCustody.revision != custody.revision ||
+      !listEquals(currentCustody.encode(), custody.encode()) ||
+      current?.revision != persisted.revision ||
+      !listEquals(current?.bytes, persisted.bytes) ||
+      installation._persisted?.revision != persisted.revision ||
+      !listEquals(installation._persisted?.bytes, persisted.bytes) ||
+      installation.readiness != InstallationReadiness.ready ||
+      !identical(enrollment.currentSession, session)) {
+    throw const CompanyBootstrapRefusal('Live authorized approver changed');
+  }
   session.validateAuthority(trust, installation.knownSecurityFloors);
   if (member.device['id'] != custody.device ||
       member.device['grant'] != custody.grant ||
