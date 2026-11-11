@@ -473,6 +473,12 @@ void main() {
           .byKey(const Key('company-jobs-enable-sync'))
           .first;
       await tester.ensureVisible(availability);
+      expect(
+        find.textContaining(
+          'share or save approved company member certificates',
+        ),
+        findsWidgets,
+      );
       debugPrint('pre-send-widget: availability-start');
       await tester.runAsync(() => tester.tap(availability));
       await joinWidgetSignal(

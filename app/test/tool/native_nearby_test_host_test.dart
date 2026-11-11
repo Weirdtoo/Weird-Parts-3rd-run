@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../tool/company_peer_native_driver_control.dart';
 import '../../tool/native_nearby_test_commands.dart';
 import '../../tool/native_nearby_test_crypto.dart';
 import '../../tool/native_nearby_test_host.dart';
@@ -348,7 +349,9 @@ void main() {
 
   for (final action in NativeTestAction.values.where(
     (a) =>
-        a != NativeTestAction.observe && a != NativeTestAction.matchWithGrant,
+        a != NativeTestAction.observe &&
+        a != NativeTestAction.matchWithGrant &&
+        a != NativeTestAction.companyPeerUi,
   )) {
     test('observeAndContext rejects ${action.name} before transport', () async {
       final f = Fixture();
@@ -365,6 +368,86 @@ void main() {
       expect(f.transport.calls, isEmpty);
     });
   }
+
+  test(
+    'candidate controls stay in command RPC and validate safe info',
+    () async {
+      final transport = FakeTransport();
+      final host = NativeTestHost(
+        transport: transport,
+        run: companyPeerDriverRun,
+        platform: 'windows',
+      );
+      final key = base64Url.encode(List.filled(32, 4));
+      final ui = {
+        'initialized': true,
+        'discovered': ['actual-peer'],
+        'selectedUser': null,
+        'canVerify': false,
+        'canMakeAvailable': false,
+        'canSync': false,
+        'sync': 'none',
+      };
+      transport.onInfo = (_) async => {
+        ...transport.infoValue,
+        'run': companyPeerDriverRun,
+        'deviceId': 'lan-$companyPeerDriverRun-receiver',
+        'peerId': companyPeerDriverOperator,
+        'candidateInputKey': key,
+        'candidateUi': ui,
+      };
+      final session = TestSession(
+        epoch: 'control-session',
+        run: companyPeerDriverRun,
+        role: TestRole.receiver,
+        deviceId: 'lan-$companyPeerDriverRun-receiver',
+        peerId: companyPeerDriverOperator,
+        encryptionPublicKey: key,
+        signingPublicKey: key,
+      );
+      expect(await host.discover(), isTrue);
+      final info = await host.handleLine(jsonEncode({'operation': 'info'}));
+      expect((info['value'] as Map)['candidateUi'], ui);
+      expect(
+        await host.handleLine(
+          jsonEncode({'operation': 'configure', 'session': session.toJson()}),
+        ),
+        {
+          'outcome': 'configure',
+          'value': {'version': 1, 'outcome': 'configured'},
+        },
+      );
+      transport.calls.clear();
+      final command = NativeTestCommand.encodeRequest(
+        session: session,
+        sequence: 1,
+        action: NativeTestAction.companyPeerUi,
+        deadlineMillis: 1000,
+        companyPeerArgument: CompanyPeerDriverArgument.parse({
+          'step': 'pair',
+          'target': 'actual-peer',
+        }, session),
+      );
+      expect(
+        await host.handleRecords(
+          jsonEncode({
+            'operation': 'observeAndContext',
+            'command': jsonDecode(command),
+          }),
+        ),
+        [
+          {'outcome': 'failed', 'category': 'invalidInput'},
+        ],
+      );
+      expect(transport.calls, isEmpty);
+      ui['unexpected'] = 'not allowed';
+      final malformed = await host.handleLine(
+        jsonEncode({'operation': 'info'}),
+      );
+      expect(malformed['outcome'], 'failed');
+      expect(jsonEncode(malformed), isNot(contains('not allowed')));
+    },
+  );
 
   test(
     'observeAndContext rejects valid match grant before any transport',
@@ -462,59 +545,52 @@ void main() {
     'invalid reply',
     'expired before second poll',
   ]) {
-    test(
-      'poll $failure retains last accepted and bounded failure',
-      () async {
-        final exhausted = failure == 'expired before second poll';
-        final malformed = failure != 'transport error';
-        var elapsed = Duration.zero;
-        final f = Fixture(elapsed: () => elapsed);
-        await f.ready();
-        var count = 0;
-        f.transport.onCommand = (_) async {
-          if (count++ == 0) return pendingObservation('accepted');
-          if (malformed) return {'raw': canary};
-          throw StateError(canary);
-        };
-        final pollDelays = <Duration>[];
-        final output = await runZoned(
-          () => f.host.handleRecords(contextRequest(f)),
-          zoneSpecification: ZoneSpecification(
-            createTimer: (self, parent, zone, delay, callback) {
-              pollDelays.add(delay);
-              return parent.createTimer(zone, delay, () {
-                elapsed = Duration(milliseconds: exhausted ? 990 : 50);
-                callback();
-              });
-            },
-          ),
-        );
-        expect(output, [
-          {'outcome': 'command', 'value': pendingObservation('accepted')},
-          {
-            'outcome': 'failed',
-            'category': exhausted
-                ? 'rpcTimeout'
-                : malformed
-                ? 'invalidOutput'
-                : 'rpcFailed',
+    test('poll $failure retains last accepted and bounded failure', () async {
+      final exhausted = failure == 'expired before second poll';
+      final malformed = failure != 'transport error';
+      var elapsed = Duration.zero;
+      final f = Fixture(elapsed: () => elapsed);
+      await f.ready();
+      var count = 0;
+      f.transport.onCommand = (_) async {
+        if (count++ == 0) return pendingObservation('accepted');
+        if (malformed) return {'raw': canary};
+        throw StateError(canary);
+      };
+      final pollDelays = <Duration>[];
+      final output = await runZoned(
+        () => f.host.handleRecords(contextRequest(f)),
+        zoneSpecification: ZoneSpecification(
+          createTimer: (self, parent, zone, delay, callback) {
+            pollDelays.add(delay);
+            return parent.createTimer(zone, delay, () {
+              elapsed = Duration(milliseconds: exhausted ? 990 : 50);
+              callback();
+            });
           },
-        ]);
-        expect(pollDelays, [const Duration(milliseconds: 50)]);
-        expect(jsonEncode(output).contains(canary), isFalse);
-        expect(f.transport.calls, [
-          'info',
-          'command',
-          if (!exhausted) 'command',
-        ]);
-        expect(f.transport.timeouts, [
-          const Duration(seconds: 3),
-          const Duration(milliseconds: 990),
-          if (!exhausted) const Duration(milliseconds: 940),
-        ]);
-        expect(count, exhausted ? 1 : 2);
-      },
-    );
+        ),
+      );
+      expect(output, [
+        {'outcome': 'command', 'value': pendingObservation('accepted')},
+        {
+          'outcome': 'failed',
+          'category': exhausted
+              ? 'rpcTimeout'
+              : malformed
+              ? 'invalidOutput'
+              : 'rpcFailed',
+        },
+      ]);
+      expect(pollDelays, [const Duration(milliseconds: 50)]);
+      expect(jsonEncode(output).contains(canary), isFalse);
+      expect(f.transport.calls, ['info', 'command', if (!exhausted) 'command']);
+      expect(f.transport.timeouts, [
+        const Duration(seconds: 3),
+        const Duration(milliseconds: 990),
+        if (!exhausted) const Duration(milliseconds: 940),
+      ]);
+      expect(count, exhausted ? 1 : 2);
+    });
   }
 
   for (final failure in ['transport', 'pid', 'not-ready', 'clock-rollback']) {

@@ -6,6 +6,8 @@ import 'dart:typed_data';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wired_parts/data/app_database.dart';
+import 'package:wired_parts/features/company/company_bootstrap.dart'
+    show CompanyBootstrapRefusal;
 import 'package:wired_parts/features/installation/installation_security.dart';
 import 'package:wired_parts/features/nearby/nearby_controller.dart';
 import 'package:wired_parts/features/nearby/nearby_discovery.dart';
@@ -158,6 +160,7 @@ final class JoinActivationStore
       delegate.writeRecoveryFileExclusive(path, bytes);
   bool loseNextBaseActivationReply = false;
   bool loseNextUserReply = false;
+  bool loseNextPeerIntroductionReply = false;
   int maximumBytes = 0;
   @override
   Future<String> compareAndSwapState(
@@ -195,6 +198,10 @@ final class JoinActivationStore
       nextRevision: nextRevision,
       bytes: bytes,
     );
+    if (loseNextPeerIntroductionReply && namespace.contains('.peer-intro-')) {
+      loseNextPeerIntroductionReply = false;
+      throw StateError('Lost protected peer introduction CAS response');
+    }
     if (loseNextUserReply && namespace.endsWith('.company-user-1')) {
       loseNextUserReply = false;
       throw StateError('Lost protected user CAS response');
@@ -240,6 +247,7 @@ final class JoinFixture {
   final OwnerSession owner;
   OwnerDataSnapshot? _ownerData;
   Future<void>? _closing;
+  Future<void>? _issuerClosing;
   bool allowOwnerAdditions = false;
   static Future<JoinFixture> create({bool allowOwnerAdditions = false}) async {
     final root = Directory.systemTemp.createTempSync('join-durable-');
@@ -291,7 +299,10 @@ final class JoinFixture {
 
   Future<void> closeAndCheckOwnerData() => _closing ??= _close();
 
-  Future<void> _close() async {
+  Future<void> closeIssuerAndCheckOwnerData() =>
+      _issuerClosing ??= _closeIssuer();
+
+  Future<void> _closeIssuer() async {
     try {
       final ownerData = _ownerData;
       if (ownerData != null) {
@@ -313,6 +324,13 @@ final class JoinFixture {
       }
     } finally {
       await aDb.close();
+    }
+  }
+
+  Future<void> _close() async {
+    try {
+      await closeIssuerAndCheckOwnerData();
+    } finally {
       await bDb.close();
       await root.delete(recursive: true);
     }
@@ -1020,6 +1038,35 @@ void main() {
     }
   });
 
+  test('issuer peer proof refuses a ledger changed after exporter', () async {
+    final f = await JoinFixture.create();
+    await activateFixtureB(f);
+    final owner = await f.aEnrollment.signIn('1234');
+    final recipient = await f.bEnrollment.signIn('1234');
+    final auth = CompanyPeerAuthentication(
+      enrollment: f.aEnrollment,
+      onProofCheckpoint: (_) async {
+        final changed = await f.aDb.customUpdate(
+          "UPDATE company_join_events SET evidence_bytes = '{}' WHERE ordinal = 1",
+        );
+        expect(changed, 1);
+      },
+    );
+    final selected = (await auth.retainedPeers(session: owner))
+        .singleWhere((peer) => peer.deviceId == recipient.identity.deviceId);
+    final (_, channel) = await joinChannels();
+    await expectLater(
+      auth.beginPeerChallenge(channel, selected, session: owner),
+      throwsA(
+        isA<CompanyBootstrapRefusal>().having(
+          (error) => error.message,
+          'message',
+          'Peer issuer ledger changed during proof preparation',
+        ),
+      ),
+    );
+  });
+
   test('issuer revocation learned in approval hook rolls all SQL back and returns no provision', () async {
     final f = await JoinFixture.create();
     final before = await sqlSnapshot(f.aDb);
@@ -1049,6 +1096,45 @@ void main() {
     ) as Map;
     expect(custody['enrollment']['pending'], isNull);
   });
+
+  test(
+    'issuer refuses a protected record changed after reconciliation',
+    () async {
+      final f = await JoinFixture.create();
+      final before = await sqlSnapshot(f.aDb);
+      final revocation = 'revocation.device.${f.owner.identity.deviceId}';
+      var armed = false;
+      var reads = 0;
+      f.aStore.beforeRead = (namespace) {
+        if (!armed || namespace != f.a.namespace || ++reads != 5) return null;
+        // The two binding checks each read the installation twice. Change it
+        // on the guard's fresh read after it resolves membership.
+        return advanceJoinFloor(f.aStore, f.a.namespace, revocation, 1);
+      };
+      final issuer = CompanyJoin(
+        enrollment: f.aEnrollment,
+        beforeCommit: () async => armed = true,
+      );
+      final recipient = CompanyJoin(enrollment: f.bEnrollment);
+      final (bc, ac) = await joinChannels();
+      final request = await issuer.receiveJoinRequest(
+        ac,
+        await recipient.beginJoin(bc),
+      );
+      await expectLater(
+        issuer.approveJoin(ac, request, ownerSession: f.owner),
+        throwsA(
+          isA<CompanyBootstrapRefusal>().having(
+            (error) => error.message,
+            'message',
+            'Live authorized approver changed',
+          ),
+        ),
+      );
+      expect(await sqlSnapshot(f.aDb), before);
+      expect(f.a.knownSecurityFloors[revocation], 1);
+    },
+  );
 
   test('fresh protected floor before B consent denies without SQL or protected changes', () async {
     final f = await JoinFixture.create();

@@ -9102,6 +9102,8 @@ final class _JoinNative with WidgetsBindingObserver {
         return exerciseJobNameUi(command.jobNameStep!);
       case NativeTestAction.jobDetailsUi:
         return exerciseJobDetailsUi(command.jobDetailsStep!);
+      case NativeTestAction.companyPeerUi:
+        rejectNativeTest('context-mismatch');
       case NativeTestAction.jobLifecycleUi:
         return exerciseJobLifecycleUi(command.jobLifecycleStep!);
     }

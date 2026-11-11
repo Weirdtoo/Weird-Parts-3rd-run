@@ -319,6 +319,37 @@ final class HeldPeerCreateContext {
         );
       }
     }
+    if (_custody.isMember && retained.certificateBytes != null) {
+      final local = await _resolveCompanyMembership(
+        db: db,
+        installation: installation,
+        trust: _trust,
+      );
+      final introduced = await _readIntroducedPeer(
+        installation,
+        _peerIntroductionSequence(retained),
+        local,
+        authority,
+        _trust,
+        record.floors,
+      );
+      if (introduced == null ||
+          !_samePeerMembership(retained, introduced.member)) {
+        throw const CompanyBootstrapRefusal('Held peer introduction changed');
+      }
+      await _recheckIntroducedPeerSlot(installation, introduced);
+      final finalState = await installation.store.readState(
+        installation.namespace,
+      );
+      final finalCustody = await enrollment._readCustody();
+      if (finalState?.revision != state.revision ||
+          !listEquals(finalState?.bytes, state.bytes) ||
+          finalCustody?.revision != custody?.revision ||
+          !identical(peer._owner._exchange, peer._held)) {
+        throw const CompanyBootstrapRefusal('Held peer introduction changed');
+      }
+      peer._held.permit.requireLive();
+    }
     peer._held.owner.validateAuthority(_trust, _floors);
     peer._held.channel._requireLive();
   }
@@ -381,25 +412,18 @@ final class CompanyPeerAuthentication {
     final custody = (await enrollment._readCustody())!;
     final result = <RetainedCompanyPeer>[];
     if (custody.isMember) {
-      // B retains only the exact approving root-fact device. A portable but
-      // otherwise unknown child certificate is not an introduction protocol.
-      final user = Map<String, Object?>.from(
-        (authority['users'] as List).single as Map,
-      );
-      final device = Map<String, Object?>.from(
-        (authority['devices'] as List).single as Map,
-      );
-      _memberFloors(user, device, trust, installation.knownSecurityFloors);
+      final floors = installation.knownSecurityFloors;
       result.add(
-        RetainedCompanyPeer._(
-          ResolvedCompanyMembership._(
-            _securityCanonical(user),
-            _securityCanonical(device),
-            trust.factsCommitment,
-            null,
-          ),
-        ),
+        RetainedCompanyPeer._(_issuingCompanyMember(authority, trust, floors)),
       );
+      final introduced = await _readIntroducedPeers(
+        installation,
+        local,
+        authority,
+        trust,
+        floors,
+      );
+      result.addAll(introduced.map((row) => RetainedCompanyPeer._(row.member)));
     } else {
       final certificates = await (enrollment.db.select(
         enrollment.db.companyMembershipCertificates,
@@ -454,22 +478,76 @@ final class CompanyPeerAuthentication {
       throw const CompanyBootstrapRefusal('Current company session required');
     }
     final floors = installation.knownSecurityFloors;
+    final expectedBinding = installation._record!.binding;
     owner.validateAuthority(trust, floors);
     final local = await resolveCompanyMembership(
       db: enrollment.db,
       installation: installation,
     );
-    final peers = await _retainedPeers(owner, validateSelected: false);
-    final peer = peers
-        .where(
-          (p) =>
-              p.deviceId == selected.deviceId &&
-              p._membership.proofCommitment ==
-                  selected._membership.proofCommitment &&
-              p._membership._device == selected._membership._device &&
-              p._membership._user == selected._membership._user,
-        )
-        .single;
+    final custody = await enrollment._readCustody();
+    _IntroducedPeer? introduced;
+    String? issuerLedger;
+    final ResolvedCompanyMembership peer;
+    if (custody?.isMember == true) {
+      final authority = await _membershipAuthority(enrollment.db, trust);
+      if (selected._membership.certificateBytes == null) {
+        peer = _issuingCompanyMember(authority, trust, floors);
+      } else {
+        introduced = await _readIntroducedPeer(
+          installation,
+          _peerIntroductionSequence(selected._membership),
+          local,
+          authority,
+          trust,
+          floors,
+        );
+        if (introduced == null) {
+          throw const CompanyBootstrapRefusal(
+            'Retained peer introduction missing',
+          );
+        }
+        peer = introduced.member;
+      }
+      if (!_samePeerMembership(peer, selected._membership)) {
+        throw const CompanyBootstrapRefusal('Retained peer context changed');
+      }
+    } else {
+      final pins = custody?.values['enrollment'];
+      if (custody == null ||
+          custody.isMember ||
+          custody.status != 'active' ||
+          pins is! Map ||
+          pins['pending'] != null ||
+          pins['ledger'] is! String) {
+        throw const CompanyBootstrapRefusal('Issuer peer ledger unavailable');
+      }
+      issuerLedger = pins['ledger'] as String;
+      // readCompanyTrust reconciled the whole issuer ledger above. Resolve
+      // this peer from it, then recheck the commitment after all proof awaits.
+      final certificate =
+          await (enrollment.db.select(
+                enrollment.db.companyMembershipCertificates,
+              )..where(
+                (row) =>
+                    row.companyId.equals(trust.companyId.value) &
+                    row.issuerDeviceId.equals(custody.device) &
+                    row.proofCommitment.equals(
+                        selected._membership.proofCommitment,
+                    ),
+              ))
+              .getSingle();
+      peer = await _resolveMemberCertificate(
+        certificate.proofBytes,
+        await _membershipAuthority(enrollment.db, trust),
+        trust,
+        const {},
+      );
+      _memberFloors(peer.user, peer.device, trust, floors);
+      if (!_samePeerMembership(peer, selected._membership) ||
+          peer.device['id'] == local.device['id']) {
+        throw const CompanyBootstrapRefusal('Retained issuer peer changed');
+      }
+    }
     owner.validateCommand(
       company: trust.companyId.value,
       shop: owner.identity.shopId,
@@ -496,7 +574,6 @@ final class CompanyPeerAuthentication {
     };
     // The actual directional session secrets, not a caller-provided transcript
     // string, contribute to the exporter. Guest/host order is the same at both ends.
-    final expectedBinding = installation._record!.binding;
     final send = await channel._send.extractBytes();
     final receive = await channel._receive.extractBytes();
     final material = channel._keys.sendDirection == 'guest'
@@ -508,6 +585,16 @@ final class CompanyPeerAuthentication {
     );
     await onProofCheckpoint?.call(CompanyPeerProofCheckpoint.afterExporter);
     await enrollment._requireSyncSessionAccount(owner);
+    if (issuerLedger != null) {
+      final finalCustody = await enrollment._readCustody();
+      if (finalCustody?.revision != custody?.revision ||
+          !listEquals(finalCustody?.encode(), custody?.encode()) ||
+          await _issuerLedgerWitness(enrollment.db) != issuerLedger) {
+        throw const CompanyBootstrapRefusal(
+          'Peer issuer ledger changed during proof preparation',
+        );
+      }
+    }
     final current = await installation.store.readState(installation.namespace);
     final currentRecord = current == null
         ? null
@@ -521,6 +608,18 @@ final class CompanyPeerAuthentication {
       throw const CompanyBootstrapRefusal(
         'Peer authority changed during proof preparation',
       );
+    }
+    if (introduced != null) {
+      await _recheckIntroducedPeerSlot(installation, introduced);
+      final finalRecord = await installation.store.readState(
+        installation.namespace,
+      );
+      if (finalRecord?.revision != current?.revision ||
+          !listEquals(finalRecord?.bytes, current?.bytes)) {
+        throw const CompanyBootstrapRefusal(
+          'Peer authority changed during proof preparation',
+        );
+      }
     }
     owner.validateAuthority(trust, floors);
     owner.validateCommand(
@@ -540,8 +639,8 @@ final class CompanyPeerAuthentication {
       'transcript': channel._keys.id,
       'exporter': base64Encode(exporter.bytes),
       'authority': trust.encode(),
-      'initiator': actor(initiator ? local : peer._membership),
-      'responder': actor(initiator ? peer._membership : local),
+      'initiator': actor(initiator ? local : peer),
+      'responder': actor(initiator ? peer : local),
     });
   }
 

@@ -606,6 +606,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
       enrollment: widget.enrollment,
       owner: _syncSession,
       peer: peer,
+      peerRosterConsent: true,
     );
     if (!mounted || _closed || (_jobSync?.isRunning ?? false)) {
       available.close();
@@ -960,7 +961,12 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
                 child: const Text('Accept this additional user'),
               ),
             ],
-            if (_peerMembership != null && (_jobSync == null || !jobsLive))
+            if (_peerMembership != null && (_jobSync == null || !jobsLive)) ...[
+              const Text(
+                'This exchange may share or save approved company member '
+                'certificates for later direct verification. Your user '
+                'permissions stay the same.',
+              ),
               FilledButton(
                 key: const Key('company-jobs-enable-sync'),
                 onPressed: _busy || (_jobSync?.isRunning ?? false)
@@ -968,6 +974,7 @@ class _CompanyJoinPageState extends State<CompanyJoinPage>
                     : () => _run(_enableJobSync),
                 child: const Text('Make Jobs available to this verified peer'),
               ),
+            ],
             if (_jobSync != null)
               FilledButton(
                 key: const Key('company-jobs-sync-now'),

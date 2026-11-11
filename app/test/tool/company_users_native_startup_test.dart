@@ -73,6 +73,36 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('wired_parts/installation_security');
 
+  test('only the designated ordinary run adds a Windows receiver', () {
+    const run = 'g2-users-20261109-peer-member-win';
+    bool allows(
+      String operatingSystem,
+      String roleName, {
+      String validationRun = run,
+      bool disabledApiProbe = false,
+      bool networkDiagnostic = false,
+    }) => companyUserValidationHostAllowed(
+      operatingSystem: operatingSystem,
+      roleName: roleName,
+      run: validationRun,
+      disabledApiProbe: disabledApiProbe,
+      networkDiagnostic: networkDiagnostic,
+    );
+
+    expect(allows('windows', 'receiver'), isTrue);
+    expect(
+      allows('windows', 'receiver', validationRun: 'g2-users-20261109-other'),
+      isFalse,
+    );
+    expect(allows('windows', 'receiver', disabledApiProbe: true), isFalse);
+    expect(allows('windows', 'receiver', networkDiagnostic: true), isFalse);
+    expect(allows('windows', 'sender', validationRun: 'existing'), isTrue);
+    expect(allows('macos', 'receiver', validationRun: 'existing'), isTrue);
+    expect(allows('macos', 'sender'), isFalse);
+    expect(allows('linux', 'receiver'), isFalse);
+    expect(allows('windows', 'owner'), isFalse);
+  });
+
   ValidationWorkspace owned() {
     final temporary = Directory.systemTemp.createTempSync(
       'startup-receipt-test-',
